@@ -515,7 +515,7 @@ GM_addStyle(
       if (y) {
         var b = await getRedpillHistory();
         if (b) {
-          w = b; // 💡 기존 3600페이지 캐시는 w에 안전하게 보관! (m은 새 데이터 수집용으로 비워둠)
+          w = b;
           a.style.display = "inline-block";
           u.style.display = "inline-block";
         }
@@ -597,7 +597,7 @@ GM_addStyle(
             // 1. 캐시와 겹치는 부분을 찾음! 새로운 내역만 m에 합침
             let newRecords = jsonData.data.slice(0, cacheHitIndex);
             m.push(...newRecords);
-            m = m.concat(w); // 2. 그 뒤에 기존 3600페이지 캐시를 통째로 이어 붙임!
+            m = m.concat(w); // 2. 그 뒤에 기존 캐시를 통째로 이어 붙임!
             w = []; // 3. 병합이 끝났으니 w는 비워줌
 
             // 4. 모인 전체 데이터를 기준으로 이어서 탐색할 과거 페이지 번호 계산
