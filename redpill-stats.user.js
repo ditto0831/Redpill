@@ -514,24 +514,26 @@ GM_addStyle(
         w = [];
       if (y) {
         var b = await getRedpillHistory();
-        b &&
-          ((m = w = b),
-          (a.style.display = "inline-block"),
-          (u.style.display = "inline-block"));
+        if (b) {
+          w = b; // 💡 기존 3600페이지 캐시는 w에 안전하게 보관! (m은 새 데이터 수집용으로 비워둠)
+          a.style.display = "inline-block";
+          u.style.display = "inline-block";
+        }
       }
       var n = w.length > 0
-    ? w.sort((t, q) => new Date(q.date) - new Date(t.date))[0]
-    : null;
+        ? [...w].sort((t, q) => new Date(q.date) - new Date(t.date))[0]
+        : null;
+
       // Crawling entrypoint (History / Payment)
-      for (H(d, h, f, m, document.body.dataset.theme === "dark", r, v, z); ; ) {
-        w = `${"https://crack-api.wrtn.ai/crack-cash/crackers/history?limit=10&type=all"}&page=${g}`;
+      for (H(d, h, f, w.length > 0 ? m.concat(w) : m, document.body.dataset.theme === "dark", r, v, z); ; ) {
+        let requestUrl = `${"https://crack-api.wrtn.ai/crack-cash/crackers/history?limit=10&type=all"}&page=${g}`;
         appendPageLog(logElement, g);
         b = 5;
         let t = !1,
           jsonData;
         for (; b > 0 && !t; )
           try {
-            const l = await fetch(w, {
+            const l = await fetch(requestUrl, {
               method: "GET",
               headers: {
                 Authorization: `Bearer ${accessToken}`,
@@ -551,10 +553,10 @@ GM_addStyle(
               u.style.display = m.length > 0 ? "inline-block" : "none";
               return;
             }
-            if (l.message.includes("401")) {
+            if (l.message && l.message.includes("401")) {
               let isRefreshed = confirm("장시간 탐색으로 권한이 만료되었습니다(401 에러).\n\n새 탭(Ctrl+T)을 열어 사이트에 한 번 접속(새로고침)한 뒤, 이 창으로 돌아와서 [확인]을 누르면 튕긴 곳부터 다시 이어서 진행합니다!");
               if (isRefreshed) {
-                b = 6; // 재시도 횟수를 꽉 채워서 다시 시도하게 리셋
+                b = 6;
               }
             }
             b--;
@@ -569,49 +571,61 @@ GM_addStyle(
             appendLog(logElement, `\uc7ac\uc2dc\ub3c4 \uc911... (${5 - b}/5)`);
             await new Promise((B) => setTimeout(B, 500));
           }
+
+        // 🛑 더 이상 조회할 과거 데이터가 없을 때의 종료 로직
         if (
           !jsonData ||
           jsonData.result !== "SUCCESS" ||
           !jsonData.data ||
           jsonData.data.length === 0
         ) {
-          appendLog(
-            logElement,
-            `\uc804\uccb4 \uae30\ub85d \ud638\ucd9c \uc644\ub8cc! (\uc18c\uc694 \uc2dc\uac04: ${Q(
-              e,
-              new Date()
-            )})`
-          );
+          let finalTotal = w.length > 0 ? m.concat(w) : m;
+          if (y) setRedpillHistory(finalTotal);
+          appendLog(logElement, `\uc804\uccb4 \uae30\ub85d \ud638\ucd9c \uc644\ub8cc! (\uc18c\uc694 \uc2dc\uac04: ${Q(e, new Date())})`);
           a.style.display = "inline-block";
           u.style.display = "inline-block";
           k.disabled = !1;
           k.textContent = "\uacc4\uc0b0";
-          H(d, h, f, m, document.body.dataset.theme === "dark", r, v, z);
+          H(d, h, f, finalTotal, document.body.dataset.theme === "dark", r, v, z);
           break;
         }
-               if (
-          n &&
-          jsonData.data.some(
-            (l) => l.date === n.date && l.title === n.title
-          )
-        ) {
-          // 멈추지 않고 이전에 튕겼던 페이지로 건너뛰는 스마트 이어달리기!
-          let jumpPage = Math.floor(m.length / 10) + 1;
-          appendLog(logElement, `기존 캐시 확인 완료! 과거에 튕겼던 ${jumpPage}페이지부터 이어서 탐색합니다 🚀`);
-          g = jumpPage;
-          n = null; // 다음부터는 이 조건을 무시하고 계속 진행
-          continue;
+
+        // 🚀 [스마트 이어달리기 핵심 로직]
+        if (n) {
+          let cacheHitIndex = jsonData.data.findIndex((l) => l.date === n.date && l.title === n.title);
+          if (cacheHitIndex !== -1) {
+            // 1. 캐시와 겹치는 부분을 찾음! 새로운 내역만 m에 합침
+            let newRecords = jsonData.data.slice(0, cacheHitIndex);
+            m.push(...newRecords);
+            m = m.concat(w); // 2. 그 뒤에 기존 3600페이지 캐시를 통째로 이어 붙임!
+            w = []; // 3. 병합이 끝났으니 w는 비워줌
+
+            // 4. 모인 전체 데이터를 기준으로 이어서 탐색할 과거 페이지 번호 계산
+            let jumpPage = Math.floor(m.length / 10) + 1;
+            appendLog(logElement, `기존 캐시 확인 완료! 새로운 내역 ${newRecords.length}개 병합 후, 과거 탐색을 위해 ${jumpPage}페이지로 점프합니다 🚀`);
+
+            g = jumpPage;
+            n = null; // 점프는 한 번만 수행!
+            continue; // 다음 루프로 넘어감 (점프한 페이지부터 시작)
+          }
         }
-        m.push(...jsonData.data); 
+
+        // 일반 수집 로직
+        m.push(...jsonData.data);
+
+        // 화면 갱신 및 캐시 저장용 임시 합본
+        let currentTotal = w.length > 0 ? m.concat(w) : m;
+
         if (y && g % 50 === 0) {
-            setRedpillHistory(m);
+            setRedpillHistory(currentTotal);
         }
         if (g % 50 === 0) {
-            H(d, h, f, m, document.body.dataset.theme === "dark", r, v, z);
+            H(d, h, f, currentTotal, document.body.dataset.theme === "dark", r, v, z);
             appendLog(logElement, `⚡ ${g}페이지 진행 중... (화면 중간 갱신 완료)`);
         }
+
         g++;
-        await new Promise((l) => setTimeout(l, 500));
+        await new Promise((l) => setTimeout(l, 200));
       }
     } else
       appendLog(logElement, "Error: access_token not found in cookies."),
