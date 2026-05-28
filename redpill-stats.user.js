@@ -1376,7 +1376,7 @@ GM_addStyle(
     let count = 0;
     let retry = 0;
     while (!requireStop) {
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 200));
 
       let result = undefined;
       while (result === undefined) {
