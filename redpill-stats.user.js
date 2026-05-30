@@ -1,1584 +1,918 @@
 // ==UserScript==
-// @name        Chasm Crystallized RedPill (결정화 캐즘 붉은약)
-// @namespace   https://github.com/milkyway0308/crystallized-chasm
-// @version     CRYS-PILL-v1.4.4
-// @description 크랙의 통계 수정 및 데이터 표시 개선. 해당 유저 스크립트는 원본 캐즘과 호환되지 않음으로, 원본 캐즘과 결정화 캐즘 중 하나만 사용하십시오.
-// @author      chasm-js, milkyway0308
-// @match       https://crack.wrtn.ai/*
-// @downloadURL https://github.com/milkyway0308/crystallized-chasm/raw/refs/heads/main/crack/redpill.user.js
-// @updateURL   https://github.com/milkyway0308/crystallized-chasm/raw/refs/heads/main/crack/redpill.user.js
-// @require     https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js#sha256-lfTRy/CZ9XFhtmS8BIQm7D35JjeAGkx5EW6DMVqnh+c=
-// @grant       GM_addStyle
+// @name         크랙 AI 답변 커스텀(제미나이API & Firebase 통합) - 플로팅 버튼 패치
+// @namespace    http://tampermonkey.net/
+// @version      3.3.2
+// @description  명령어 퀄리티 극대화, 자유롭게 이동 가능한 플로팅 설정 버튼 적용
+// @match        https://crack.wrtn.ai/*
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_xmlhttpRequest
+// @connect      generativelanguage.googleapis.com
 // ==/UserScript==
-GM_addStyle(
-  'body[data-theme="dark"] .red-pill-realtime-usage { color: #F0EFEB; font-weight: bold; font-size: 12px;}' +
-    'body[data-theme="light"] .red-pill-realtime-usage {color: #1A1918; font-weight: bold; font-size: 12px;}' +
-    ".red-pill-refresh-button { padding: 0px 12px; border: 1px solid var(--text_disabled); height: 28px; color: var(--text_primary); font-size: 14px; margin-right: 5px; border-radius: 4px; font-weight: 600; }"
-);
+
 (function () {
-  const VERSION = "v1.4.4";
-  let isIntegrationMode = false;
-  /**
-   * 쿠키에서 액세스 토큰을 추출해 반환합니다.
-   * @returns 액세스 토큰
-   */
-  function extractAccessToken() {
-    const cookies = document.cookie.split(";");
-    for (let cookie of cookies) {
-      const [key, value] = cookie.trim().split("=");
-      if (key === "access_token") return value;
-    }
-    return null;
-  }
-  /**
-   * 지정된 로그 요소의 맨 윗 부분에 로그를 덧붙이고, 맨 위로 스크롤합니다.
-   * @param {Node} logElement 로그 요소. TextArea, 혹은 span을 사용합니다.
-   * @param {string} message 덧붙일 로그 메시지
-   */
-  function appendLog(logElement, message) {
-    const time = new Date().toLocaleString();
-    logElement.value = `[${time}]\n${message}\n\n${logElement.value}`;
-    logElement.scrollTop = 0;
-  }
-  function extractUsageQuantity(json) {
-    // If [json.quantity] exists, it is legacy format - keep it for compatibility
-    if (json.quantity) {
-      return json.quantity;
-    }
-    // If product is cracker, just return value
-    if (json.product === "cracker") {
-      return json.balance.total;
-    }
-    // If product is superchat, it's legacy log - multiply 35
-    if (json.product === "superchat") {
-      return json.balance.total * 35;
-    }
-    // If none matched, it's unknown at this moment - just return value
-    return json.balance.total;
-  }
-  function appendPageLog(c, d) {
-    const h = c.value.split("\n"),
-      f = h.findIndex(
-        (a) =>
-          a.includes("\uc0ac\uc6a9\ub0b4\uc5ed") &&
-          a.match(/\ud398\uc774\uc9c0 \ub85c\ub4dc\ub428$/)
-      );
-    f >= 0 && (h.splice(f - 1, 3), (c.value = h.join("\n")));
-    appendLog(
-      c,
-      `\uc0ac\uc6a9\ub0b4\uc5ed ${d} \ud398\uc774\uc9c0 \ub85c\ub4dc\ub428`
+  "use strict";
+
+  const API_BASE = "https://crack-api.wrtn.ai/crack-gen";
+
+  let generatedHistory = [];
+  let historyIndex = -1;
+
+  function getChatRoomId() {
+    const match = location.pathname.match(
+      /\/stories\/[^/]+\/episodes\/([^/]+)/,
     );
+    return match ? match[1] : "global_room";
   }
-  function Q(c, d) {
-    c = d - c;
-    d = Math.floor((c % 6e4) / 1e3);
-    return `${String(Math.floor(c / 6e4)).padStart(2, "0")}\ubd84 ${String(
-      d
-    ).padStart(2, "0")}\ucd08`;
+
+  // =============================================
+  // 1. 스타일 (플로팅 버튼 UI 추가)
+  // =============================================
+  GM_addStyle(`
+        /* 🌟 새로 추가된 플로팅 설정 버튼 */
+        #crack-floating-btn {
+            position: fixed; bottom: 30px; left: 30px; z-index: 999998;
+            background-color: var(--surface_brand_primary, #6A3DE8); color: white;
+            padding: 12px 18px; border-radius: 50px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            font-size: 14px; font-weight: bold; font-family: var(--font-sans);
+            display: flex; align-items: center; gap: 8px;
+            cursor: grab; user-select: none; transition: background-color 0.2s, transform 0.2s;
+        }
+        #crack-floating-btn:hover { background-color: #5228CC; transform: scale(1.05); }
+        #crack-floating-btn:active { cursor: grabbing; transform: scale(0.95); }
+
+        /* 채팅창 내 매직 버튼 및 위젯 */
+        .crack-right-group { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .crack-pure-magic {
+            height: 1.75rem; width: 1.75rem; min-width: 1.75rem; border-radius: 9999px;
+            background-color: #6A3DE8; color: white; display: inline-flex; align-items: center; justify-content: center;
+            cursor: pointer; border: none; padding: 0; box-shadow: 0 4px 6px var(--shadow-md); transition: all 0.2s;
+        }
+        .crack-pure-magic:hover { transform: scale(1.1); background-color: #5228CC; }
+
+        .crack-history-widget {
+            display: none; align-items: center; gap: 8px;
+            background: var(--bg_elevated_primary); border: 1px solid var(--border);
+            border-radius: 12px; padding: 4px 10px; font-size: 13px; font-weight: bold; color: var(--text_primary);
+        }
+        .crack-history-btn { cursor: pointer; color: var(--text_secondary); transition: 0.2s; user-select: none; }
+        .crack-history-btn:hover { color: var(--text_brand); transform: scale(1.1); }
+
+        /* AI 패널 설정 */
+        #crack-ai-panel {
+            position: fixed; top: 80px; right: 30px; z-index: 999999;
+            width: min(560px, 90vw); max-height: 85vh;
+            background-color: var(--bg_screen); border: 1px solid var(--border); border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5); color: var(--text_primary); font-family: var(--font-sans);
+            display: none; flex-direction: column; overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 16px 20px; background-color: var(--bg_elevated_primary);
+            border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+            cursor: move; user-select: none;
+        }
+        .panel-title { font-size: 16px; font-weight: 800; color: var(--text_brand); display: flex; align-items: center; gap: 6px; }
+        .panel-close { cursor: pointer; font-size: 18px; color: var(--text_secondary); transition: 0.2s; padding: 0 5px; }
+        .panel-close:hover { color: #ff4444; transform: scale(1.1); }
+
+        .panel-content { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; }
+        .panel-content::-webkit-scrollbar { width: 6px; }
+        .panel-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+        .setting-group { display: flex; flex-direction: column; gap: 8px; }
+        .setting-label { font-size: 12px; color: var(--text_secondary); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;}
+
+        .info-box { background: var(--bg_elevated_primary); border: 1px solid var(--border); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+        .info-title { font-size: 12px; color: var(--text_action_blue_primary); font-weight: 800; display: flex; align-items: center; gap: 4px; }
+        .info-text { font-size: 13px; color: var(--text_primary); line-height: 1.5; word-break: break-all; white-space: pre-wrap; }
+
+        .expand-input {
+            width: 100%; box-sizing: border-box; padding: 12px;
+            background-color: var(--bg_elevated_secondary); color: var(--text_primary);
+            border: 1px solid var(--border); border-radius: 8px; font-size: 14px; outline: none; transition: 0.2s;
+        }
+        .expand-input:focus { border-color: var(--text_brand); }
+        textarea.expand-input { resize: vertical; line-height: 1.5; }
+
+        .radio-group { display: flex; gap: 16px; align-items: center; font-size: 14px; }
+        .radio-group label { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+
+        .tone-container { display: flex; flex-wrap: wrap; gap: 8px; }
+        .tone-chip {
+            padding: 6px 14px; border: 1px solid var(--border); border-radius: 20px;
+            font-size: 13px; cursor: pointer; color: var(--text_secondary); background: var(--bg_elevated_primary); transition: 0.2s;
+        }
+        .tone-chip:hover { border-color: var(--text_secondary); }
+        .tone-chip.active { background-color: #6A3DE8; color: white; border-color: #6A3DE8; font-weight: bold; }
+
+        .acc-wrapper { display: flex; flex-direction: column; gap: 0; }
+        .acc-header {
+            font-size: 14px; font-weight: 800; color: var(--text_primary); background: var(--bg_elevated_primary);
+            padding: 14px; border-radius: 8px; cursor: pointer; border: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center; transition: 0.2s;
+        }
+        .acc-header:hover { background: var(--bg_elevated_secondary); }
+        .acc-content {
+            display: none; padding: 16px; border: 1px solid var(--border); border-top: none;
+            border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; background: var(--bg_elevated_primary);
+            flex-direction: column; gap: 16px;
+        }
+        .acc-content.open { display: flex; }
+
+        .slots-container { display: flex; flex-direction: column; gap: 8px; }
+        .lore-details { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+        .lore-details:last-child { border-bottom: none; padding-bottom: 0; }
+        .lore-summary { font-size: 13px; font-weight: 700; color: var(--text_primary); cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; list-style: none; }
+        .lore-summary::-webkit-details-marker { display: none; }
+        .lore-summary::before { content: '▶'; font-size: 10px; color: var(--text_secondary); transition: 0.2s; }
+        .lore-details[open] .lore-summary::before { transform: rotate(90deg); }
+        .lore-summary label { cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 0; }
+
+        .ego-slider-box { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--bg_elevated_primary); border: 1px solid var(--border); border-radius: 8px; }
+        .ego-desc { font-size: 11px; text-align: center; color: var(--text_brand); font-weight: bold; }
+
+        .btn-save { width: 100%; background: var(--surface_brand_primary); color: white; border: none; padding: 14px; border-radius: 10px; cursor: pointer; font-weight: 800; font-size: 15px; transition: 0.2s; letter-spacing: 1px; }
+        .btn-save:hover { opacity: 0.9; transform: translateY(-2px); }
+
+        @keyframes crack-spin { 100% { transform: rotate(360deg); } }
+        .spin-anim { display: inline-block; animation: crack-spin 1s linear infinite; }
+    `);
+
+  // =============================================
+  // 2. 패널 구성
+  // =============================================
+  let loreSlotsHTML = "";
+  for (let i = 1; i <= 10; i++) {
+    loreSlotsHTML += `
+            <details class="lore-details">
+                <summary class="lore-summary">
+                    <label onclick="event.stopPropagation()"><input type="checkbox" id="lore-active-${i}"> 세계관 규칙 ${i}</label>
+                </summary>
+                <textarea id="lore-text-${i}" class="expand-input" rows="2" placeholder="이 규칙은 AI가 절대적으로 따릅니다..." style="margin-top: 8px;"></textarea>
+            </details>
+        `;
   }
-  function H(c, d, h, f, a, u = 0, p = [], y = {}) {
-    let k = f.filter((b) => {
-      b = b.date.slice(0, 7);
-      return y[b] !== !1;
-    });
-    let purchaseCount = p.filter((b) => {
-      b = b.paymentDate.slice(0, 7);
-      return y[b] !== !1;
-    }).length;
-    const totalConsumed = k
-        .filter((b) => b.isConsumed)
-        .reduce((b, n) => b + extractUsageQuantity(n), 0),
-      totalCollected = k
-        .filter((b) => !b.isConsumed)
-        .reduce((b, n) => b + extractUsageQuantity(n), 0),
-      unlimitedUsage = k
-        .filter((b) => b.isConsumed && b.consumedType === "unlimited")
-        .reduce((b, n) => b + extractUsageQuantity(n), 0),
-      lastTime =
-        k.length > 0
-          ? k
-              .sort((b, n) => new Date(n.date) - new Date(b.date))[0]
-              .date.slice(0, 10)
-          : "N/A";
-    c.innerHTML = `
-            <div style="display: flex; flex-direction: column; gap: 10px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-                    <div><strong>총 사용량:</strong> <span style="font-family: monospace;">${totalConsumed}</span></div>
-                    <div><strong>총 획득량:</strong> <span style="font-family: monospace;">${totalCollected}</span></div>
-                    <div><strong>마지막 내역 날짜:</strong> <span style="font-family: monospace;">${lastTime}</span></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-                    <div><strong>무제한 사용 총량:</strong> <span style="font-family: monospace;">${unlimitedUsage}</span></div>
-                    <div><strong>결제 횟수:</strong> <span style="font-family: monospace;">${purchaseCount}</span></div>
-                    <div><strong>평균 사용량:</strong> <span style="font-family: monospace;">${
-                      purchaseCount > 0
-                        ? Math.round(unlimitedUsage / purchaseCount)
-                        : 0
-                    }</span></div>
+
+  const panel = document.createElement("div");
+  panel.id = "crack-ai-panel";
+  panel.innerHTML = `
+        <div class="panel-header" id="panel-drag-handle">
+            <div class="panel-title">✨ AI 집필 설정 (V3.3.2)</div>
+            <div class="panel-close" id="close-panel">✕</div>
+        </div>
+        <div class="panel-content">
+            <div class="setting-group" style="background: var(--bg_elevated_primary); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+                <span class="setting-label" style="color: var(--text_brand);">작업 모드 (서술/묘사)</span>
+                <div class="radio-group">
+                    <label><input type="radio" name="cfg-mode" value="expand" checked> 🪄 화려하게 부풀리기</label>
+                    <label><input type="radio" name="cfg-mode" value="polish"> ✍️ 원본 유지 (고급 다듬기)</label>
                 </div>
             </div>
-        `;
-    const g = {};
-    f.forEach((b) => {
-      var n = new Date(b.date);
-      const t = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(
-        2,
-        "0"
-      )}`;
-      n = String(n.getDate()).padStart(2, "0");
-      g[t] ||
-        (g[t] = {
-          consumption: {},
-          acquisition: {},
-          totalConsumption: 0,
-          totalAcquisition: 0,
-        });
-      const q = b.isConsumed ? "consumption" : "acquisition";
-      let quantity = b.quantity
-        ? b.quantity
-        : b.product === "cracker"
-        ? b.balance.total
-        : b.balance.total * 35;
-      g[t][q][n] = (g[t][q][n] || 0) + quantity;
-      g[t][b.isConsumed ? "totalConsumption" : "totalAcquisition"] += quantity;
-    });
-    purchaseCount = `
-            <style>
-                details > summary .toggle-text::after {
-                    content: '(\ub354\ubcf4\uae30)';
-                    opacity: 0.5;
-                    font-size: 0.8rem;
-                }
-                details[open] > summary .toggle-text::after {
-                    content: '(\ub2eb\uae30)';
-                    opacity: 0.5;
-                    font-size: 0.8rem;
-                }
-            </style>
-            <div style="display: flex; flex-direction: column; gap: 5px; color: ${
-              a ? "#ddd" : "#333"
-            };">
-        `;
-    for (const [b, n] of Object.entries(g).sort().reverse())
-      purchaseCount += `
-                <details style="border-bottom: 1px solid ${
-                  a ? "#444" : "#ccc"
-                };">
-                    <summary style="display: flex; align-items: center; padding: 5px; cursor: pointer; min-height: 20px; background: ${
-                      a ? "#333" : "#f0f0f0"
-                    };">
-                        <input type="checkbox" class="month-checkbox" data-month="${b}" ${
-        y[b] !== !1 ? "checked" : ""
-      } style="margin-right: 5px;">
-                        <div style="flex: 1;">${b} <span class="toggle-text"></span></div>
-                        <div style="width: 100px; text-align: right; font-family: monospace;">+${
-                          n.totalAcquisition
-                        }</div>
-                        <div style="width: 100px; text-align: right; font-family: monospace;">-${
-                          n.totalConsumption
-                        }</div>
-                    </summary>
-                    <div style="display: block; padding: 5px; background: ${
-                      a ? "#2a2a2a" : "#f9f9f9"
-                    }; min-height: 40px;">
-                        ${[
-                          [1, 10],
-                          [11, 20],
-                          [21, 31],
-                        ]
-                          .map(
-                            ([t, q]) => `
-                            <ul style="display: flex; flex-direction: column; gap: 5px; padding: 5px; margin: 0;">
-                                <li style="display: flex; gap: 5px; background: ${
-                                  a ? "#444" : "#e0e0e0"
-                                }; border-bottom: 1px solid ${
-                              a ? "#555" : "#ccc"
-                            };">
-                                    <div style="width: 60px; font-weight: bold;">\uc77c\uc790</div>
-                                    ${Array.from(
-                                      { length: q - t + 1 },
-                                      (l, B) =>
-                                        `<div style="width: 40px; text-align: center;">${
-                                          t + B
-                                        }</div>`
-                                    ).join("")}
-                                </li>
-                                <li style="display: flex; gap: 5px;">
-                                    <div style="width: 60px;">\ud68d\ub4dd\ub7c9</div>
-                                    ${Array.from(
-                                      { length: q - t + 1 },
-                                      (l, B) => {
-                                        l = String(t + B).padStart(2, "0");
-                                        l = n.acquisition[l] || 0;
-                                        return `<div style="width: 40px; text-align: center; font-family: monospace;">${
-                                          l > 0 ? "+" + l : ""
-                                        }</div>`;
-                                      }
-                                    ).join("")}
-                                </li>
-                                <li style="display: flex; gap: 5px;">
-                                    <div style="width: 60px;">\uc18c\ubaa8\ub7c9</div>
-                                    ${Array.from(
-                                      { length: q - t + 1 },
-                                      (l, B) => {
-                                        l = String(t + B).padStart(2, "0");
-                                        l = n.consumption[l] || 0;
-                                        return `<div style="width: 40px; text-align: center; font-family: monospace;">${
-                                          l > 0 ? "-" + l : ""
-                                        }</div>`;
-                                      }
-                                    ).join("")}
-                                </li>
-                            </ul>
-                        `
-                          )
-                          .join("")}
+
+            <div class="ego-slider-box">
+                <span class="setting-label" style="margin:0;">🎚️ 대사 개입 및 전개 게이지</span>
+                <input type="range" id="cfg-ego" min="1" max="5" value="1" style="width:100%;">
+                <div id="ego-desc" class="ego-desc">1단계: 원본 100% 보존 (빈칸: 턴 넘기기)</div>
+                <div style="font-size:10px; color:var(--text_secondary); text-align:center; margin-top:4px;">💡 입력창의 내용 유무(대사 vs 빈칸)에 따라 AI의 역할이 스마트하게 바뀝니다.</div>
+            </div>
+
+            <div class="info-box">
+                <div>
+                    <div class="info-title">🔍 현재 감지된 프로필 (채팅방 자동저장)</div>
+                    <div id="detected-profile" class="info-text" style="font-weight:800; margin-top:6px;">스캔 대기 중...</div>
+                </div>
+                <div style="border-top: 1px solid var(--border); padding-top: 10px;">
+                    <div class="info-title">📝 PC 추가 설정 (방별 실시간 저장)</div>
+                    <textarea id="cfg-pc-note" class="expand-input" style="font-size:13px; height:80px; margin-top:6px; margin-bottom:0;" placeholder="AI 집필에 반영할 PC(플레이어)의 성격, 과거사, 특이사항 등을 적어주세요."></textarea>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <span class="setting-label">서술 시점</span>
+                <div class="radio-group">
+                    <label><input type="radio" name="cfg-pov" value="1" checked> 1인칭 (나)</label>
+                    <label><input type="radio" name="cfg-pov" value="3"> 3인칭</label>
+                    <input type="text" id="cfg-pov-name" class="expand-input" placeholder="이름 (예: )" style="display:none; width:140px; padding:8px; margin:0;">
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <span class="setting-label">문체 스타일</span>
+                <select id="cfg-style" class="expand-input">
+                    <option value="기본">기본 톤</option>
+                    <option value="동화처럼 따뜻하고 몽글몽글한 문체">동화풍 (따뜻/몽글)</option>
+                    <option value="라이트노벨처럼 가볍고 톡톡 튀는 문체">라노벨풍 (가벼움/톡톡)</option>
+                    <option value="건조하고 간결한 문체">건조/간결</option>
+                    <option value="서정적이고 섬세한 문체">서정/섬세</option>
+                    <option value="위트 있고 비꼬는 듯한 문체">위트/시니컬</option>
+                    <option value="거칠고 냉소적인 하드보일드 문체">하드보일드 (거침/냉소)</option>
+                    <option value="정통 무협의 비장하고 묵직한 문체">무협/비장</option>
+                    <option value="자조적이고 퇴폐적인 우울한 문체">자조/퇴폐</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <span class="setting-label">분위기 추가 (중복 선택 가능)</span>
+                <div class="tone-container">
+                    <span class="tone-chip" data-val="로맨스">💕 로맨스</span>
+                    <span class="tone-chip" data-val="코믹">😂 코믹</span>
+                    <span class="tone-chip" data-val="액션">⚔️ 액션</span>
+                    <span class="tone-chip" data-val="스릴러">🔪 스릴러</span>
+                    <span class="tone-chip" data-val="공포">👻 공포</span>
+                    <span class="tone-chip" data-val="피폐">🌑 피폐</span>
+                    <span class="tone-chip" data-val="관능적">💋 관능적</span>
+                    <span class="tone-chip" data-val="일상">☕ 일상</span>
+                    <span class="tone-chip" data-val="몽환적">✨ 몽환적</span>
+                    <span class="tone-chip" data-val="애절함">💧 애절/슬픔</span>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <span class="setting-label">출력 분량 제한 (목표 문단 수: <span id="len-val" style="color:var(--text_brand);">3</span>문단)</span>
+                <input type="range" id="cfg-len" min="1" max="5" value="3" style="width:100%;">
+                <div style="font-size:10px; color:var(--text_secondary); text-align:center;">1문단(아주 짧게) ~ 5문단 이상(매우 길게)</div>
+            </div>
+
+            <div class="acc-wrapper">
+                <div class="acc-header" data-target="acc-lore">🌍 세계관 사전 (최대 10개) <span>▼</span></div>
+                <div id="acc-lore" class="acc-content">
+                    <div class="slots-container">${loreSlotsHTML}</div>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <span class="setting-label">💡 커스텀 규칙 (방별 실시간 저장)</span>
+                <textarea id="cfg-custom-rule" class="expand-input" rows="3" placeholder="예: 필담은 \` \`로 묶어서 표현할 것."></textarea>
+            </div>
+
+            <div class="acc-wrapper">
+                <div class="acc-header" data-target="acc-advanced">⚙️ 고급 설정 & API 키 <span>▼</span></div>
+                <div id="acc-advanced" class="acc-content">
+                    <div class="setting-group">
+                        <span class="setting-label" style="margin-top:0;">API 제공자</span>
+                        <select id="cfg-api-provider" class="expand-input">
+                            <option value="google">Google (기본 API)</option>
+                            <option value="firebase">Firebase (Vertex API)</option>
+                        </select>
                     </div>
-                </details>
-            `;
-    d.innerHTML =
-      purchaseCount +
-      `
-            </div>
-            <div style="margin-top: 10px; opacity: 0.5; font-size: 0.7rem; color: ${
-              a ? "#ddd" : "#333"
-            };">
-                \uccb4\ud06c\ub41c \uc6d4\uc758 \ub0b4\uc5ed\ub9cc\uc73c\ub85c \ub7ad\ud0b9 \ubc0f CSV \ud30c\uc77c\uc774 \uc0dd\uc131\ub429\ub2c8\ub2e4.
-            </div>
-        `;
-    d.querySelectorAll(".month-checkbox").forEach((b) => {
-      b.addEventListener("change", () => {
-        y[b.dataset.month] = b.checked;
-        H(c, d, h, f, a, u, p, y);
-      });
-    });
-    const m = {};
-    k.filter((b) => b.isConsumed).forEach((b) => {
-      m[b.title] = (m[b.title] || 0) + extractUsageQuantity(b);
-    });
-    k = Object.entries(m).sort(([, b], [, n]) => n - b);
-    let w = `
-            <div style="display: flex; flex-direction: column; gap: 5px;">
-                <div style="display: flex; background: ${
-                  a ? "#333" : "#f0f0f0"
-                }; padding: 5px;">
-                    <div style="width: 60px; font-weight: bold;">\uc21c\uc704</div>
-                    <div style="flex: 1; font-weight: bold;">\uc791\ud488</div>
-                    <div style="width: 100px; font-weight: bold; text-align: right;">\uc0ac\uc6a9\ub7c9</div>
+                    <div class="setting-group">
+                        <span class="setting-label" id="cfg-key-label">GEMINI API KEY</span>
+                        <input type="password" id="cfg-api-key" class="expand-input" placeholder="키를 입력하세요">
+                        <textarea id="cfg-firebase-script" class="expand-input" rows="5" placeholder="파이어베이스에서 복사한 코드 전체를 여기에 그대로 붙여넣어 주세요!" style="display:none; font-family: monospace; font-size:12px;"></textarea>
+                    </div>
+                    <div class="setting-group">
+                        <span class="setting-label">AI 모델 선택</span>
+                        <select id="cfg-model" class="expand-input">
+                            <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        </select>
+                    </div>
+                    <div class="setting-group">
+                        <span class="setting-label">🧠 AI 대화 기억력 (현재 <span id="mem-val" style="color:var(--text_brand);">8</span>개)</span>
+                        <input type="range" id="cfg-memory" min="1" max="20" value="8" style="width:100%;">
+                    </div>
                 </div>
-        `;
-    k.forEach(([b, n], t) => {
-      w += `
-                <div style="display: flex; padding: 5px; border-bottom: 1px solid ${
-                  a ? "#444" : "#ccc"
-                };">
-                    <div style="width: 60px; font-family: monospace;">${
-                      t + 1
-                    }</div>
-                    <div style="flex: 1;">${b}</div>
-                    <div style="width: 100px; text-align: right; font-family: monospace;">${n}</div>
-                </div>
-            `;
-    });
-    w += "</div>";
-    h.innerHTML = w;
+            </div>
+
+            <button id="cfg-save-btn" class="btn-save">글로벌 설정 저장</button>
+        </div>
+    `;
+  document.body.appendChild(panel);
+
+  // =============================================
+  // 3. 패널 드래그 관리 (기존 패널 창)
+  // =============================================
+  const dragHandle = document.getElementById("panel-drag-handle");
+  let isDragging = false, startX, startY, initLeft, initTop;
+
+  let savedLeft = GM_getValue("panelLeft", null);
+  let savedTop = GM_getValue("panelTop", null);
+  if (savedLeft !== null && savedTop !== null) {
+    if (isNaN(savedLeft) || isNaN(savedTop) || savedLeft < 0 || savedTop < 0 || savedLeft > window.innerWidth || savedTop > window.innerHeight) {
+      GM_deleteValue("panelLeft");
+      GM_deleteValue("panelTop");
+    } else {
+      panel.style.left = savedLeft + "px";
+      panel.style.top = savedTop + "px";
+      panel.style.right = "auto";
+    }
   }
-  function S(c, d) {
-    let h = "Date,Title,IsConsumed,Quantity,ConsumedType\n";
-    c.filter((f) => {
-      f = f.date.slice(0, 7);
-      return d[f] !== !1;
-    }).forEach((f) => {
-      h +=
-        [
-          `"${f.date}"`,
-          `"${f.title}"`,
-          f.isConsumed,
-          f.quantity,
-          `"${f.consumedType || ""}"`,
-        ].join() + "\n";
-    });
-    return (h = h.trim());
-  }
-  function T(c, d, h, f) {
-    c = c.filter((e) => {
-      e = e.date.slice(0, 7);
-      return f[e] !== !1;
-    });
-    h = h.filter((e) => {
-      e = e.paymentDate.slice(0, 7);
-      return f[e] !== !1;
-    }).length;
-    let a = "";
-    const u = c
-        .filter((e) => e.isConsumed)
-        .reduce((e, g) => e + extractUsageQuantity(g), 0),
-      p = c
-        .filter((e) => !e.isConsumed)
-        .reduce((e, g) => e + extractUsageQuantity(g), 0),
-      y = c
-        .filter((e) => e.isConsumed && e.consumedType === "unlimited")
-        .reduce((e, g) => e + extractUsageQuantity(g), 0),
-      k = h > 0 ? Math.round(y / h) : 0;
-    a += '"\uc804\uccb4 \ud1b5\uacc4"\n';
-    a += '"\ud56d\ubaa9","\uac12"\n';
-    a += `"\ucd1d \uc0ac\uc6a9\ub7c9","${u}"\n`;
-    a += `"\ucd1d \ud68d\ub4dd\ub7c9","${p}"\n`;
-    a += `"\ud604\uc7ac \ubcf4\uc720\ub7c9","${d}"\n`;
-    a += `"\ubb34\uc81c\ud55c \uc0ac\uc6a9 \ucd1d\ub7c9","${y}"\n`;
-    a += `"\uacb0\uc81c \ud69f\uc218","${h}"\n`;
-    a += `"\ud3c9\uade0 \uc0ac\uc6a9\ub7c9","${k}"\n`;
-    const r = {},
-      v = {};
-    c.forEach((e) => {
-      var g = new Date(e.date);
-      g = `${g.getFullYear()}-${String(g.getMonth() + 1).padStart(2, "0")}`;
-      const m = e.isConsumed ? r : v;
-      m[g] = (m[g] || 0) + extractUsageQuantity(e);
-    });
-    a += '\n"\uc6d4\ubcc4 \ud1b5\uacc4"\n';
-    a += '"\uc6d4","\uc0ac\uc6a9\ub7c9","\ud68d\ub4dd\ub7c9"\n';
-    [...new Set([...Object.keys(r), ...Object.keys(v)])]
-      .sort()
-      .reverse()
-      .forEach((e) => {
-        a += `"${e}","${r[e] || 0}","${v[e] || 0}"\n`;
+
+  dragHandle.addEventListener("mousedown", (e) => {
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    const rect = panel.getBoundingClientRect();
+    initLeft = rect.left;
+    initTop = rect.top;
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    e.preventDefault();
+    let newLeft = Math.max(0, Math.min(initLeft + (e.clientX - startX), window.innerWidth - panel.offsetWidth));
+    let newTop = Math.max(0, Math.min(initTop + (e.clientY - startY), window.innerHeight - panel.offsetHeight));
+    panel.style.left = newLeft + "px";
+    panel.style.top = newTop + "px";
+    panel.style.right = "auto";
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (isDragging) {
+      isDragging = false;
+      GM_setValue("panelLeft", parseInt(panel.style.left));
+      GM_setValue("panelTop", parseInt(panel.style.top));
+    }
+  });
+
+  // =============================================
+  // 4. 새로운 플로팅 버튼 생성 및 드래그 관리
+  // =============================================
+  function initFloatingButton() {
+      if (document.getElementById("crack-floating-btn")) return;
+
+      const fBtn = document.createElement("div");
+      fBtn.id = "crack-floating-btn";
+      fBtn.innerHTML = `⚙️ <span>AI 설정</span>`;
+      document.body.appendChild(fBtn);
+
+      // 위치 불러오기
+      let sLeft = GM_getValue("fBtnLeft", null);
+      let sTop = GM_getValue("fBtnTop", null);
+      if (sLeft !== null && sTop !== null) {
+          fBtn.style.left = sLeft + "px";
+          fBtn.style.top = sTop + "px";
+          fBtn.style.bottom = "auto"; // 기본 bottom 값을 해제
+      }
+
+      let isFDragging = false;
+      let hasDragged = false;
+      let fStartX, fStartY, fInitLeft, fInitTop;
+
+      fBtn.addEventListener("mousedown", (e) => {
+          isFDragging = true;
+          hasDragged = false;
+          fStartX = e.clientX;
+          fStartY = e.clientY;
+          const rect = fBtn.getBoundingClientRect();
+          fInitLeft = rect.left;
+          fInitTop = rect.top;
       });
-    const z = {};
-    c.forEach((e) => {
-      var g = new Date(e.date);
-      const m = `${g.getFullYear()}-${String(g.getMonth() + 1).padStart(
-        2,
-        "0"
-      )}`;
-      g = String(g.getDate()).padStart(2, "0");
-      z[m] || (z[m] = { consumption: {}, acquisition: {} });
-      const w = e.isConsumed ? "consumption" : "acquisition";
-      z[m][w][g] = (z[m][w][g] || 0) + extractUsageQuantity(e);
-    });
-    for (const [e, g] of Object.entries(z).sort().reverse())
-      for (
-        a += `\n"\uc77c\ubcc4 \ud1b5\uacc4 - ${e}"\n`,
-          a += '"\uc77c\uc790","\uc0ac\uc6a9\ub7c9","\ud68d\ub4dd\ub7c9"\n',
-          d = 1;
-        d <= 31;
-        d++
-      )
-        (h = String(d).padStart(2, "0")),
-          (a += `"${d}","${g.consumption[h] || 0}","${
-            g.acquisition[h] || 0
-          }"\n`);
-    const D = {};
-    c.filter((e) => e.isConsumed).forEach((e) => {
-      D[e.title] = (D[e.title] || 0) + extractUsageQuantity(e);
-    });
-    c = Object.entries(D).sort(([, e], [, g]) => g - e);
-    a += '\n"\uc791\ud488\ubcc4 \ub7ad\ud0b9"\n';
-    a += '"\uc21c\uc704","\uc791\ud488","\uc0ac\uc6a9\ub7c9"\n';
-    c.forEach(([e, g], m) => {
-      a += `"${m + 1}","${e}","${g}"\n`;
-    });
-    return (a = a.trim());
-  }
-  async function U(c, logElement, h) {
-    let f = 5,
-      a = !1,
-      u;
-    for (; f > 0 && !a; )
-      try {
-        const p = await fetch("https://crack-api.wrtn.ai/crack-cash/crackers", {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${c}`,
-            "Content-Type": "application/json",
-          },
-          signal: h.signal,
-        });
-        if (!p.ok) throw Error(`HTTP error! Status: ${p.status}`);
-        u = await p.json();
-        a = !0;
-      } catch (p) {
-        if (p.name === "AbortError")
-          return (
-            appendLog(
-              logElement,
-              "보유량 API 호출이 사용자에 의해 중단되었습니다."
-            ),
-            0
-          );
-        f--;
-        if (f === 0)
-          return (
-            appendLog(
-              logElement,
-              `보유량 Error: ${p.message} (재시도 횟수 초과)`
-            ),
-            0
-          );
-        appendLog(logElement, `보유량 재시도 중... (${5 - f}/5)`);
-      }
-    return u && u.result === "SUCCESS" && u.data ? u.data.quantity : 0;
-  }
-  async function getUnlimitedUsageLogs(c, d, h) {
-    let f = 1,
-      a = [];
-    for (;;) {
-      const u = `https://crack-api.wrtn.ai/crack-cash/crackers/payment-history?limit=10&type=unlimited&page=${f}`;
-      appendLog(d, `무제한 결제 내역 ${f} 페이지 로드 중...`);
-      let p = 5,
-        y = !1,
-        k;
-      for (; p > 0 && !y; )
-        try {
-          const r = await fetch(u, {
-            method: "GET",
-            headers: {
-              Authorization: `Bearer ${c}`,
-              "Content-Type": "application/json",
-            },
-            signal: h.signal,
-          });
-          if (!r.ok) throw Error(`HTTP error! Status: ${r.status}`);
-          k = await r.json();
-          y = !0;
-        } catch (r) {
-          if (r.name === "AbortError")
-            return (
-              appendLog(
-                d,
-                "결제 내역 API 호출이 사용자에 의해 중단되었습니다."
-              ),
-              a
-            );
-          p--;
-          if (p === 0)
-            return (
-              appendLog(d, `결제 내역 Error: ${r.message} (재시도 횟수 초과)`),
-              a
-            );
-          appendLog(
-            d,
-            `\uacb0\uc81c \ub0b4\uc5ed \uc7ac\uc2dc\ub3c4 \uc911... (${
-              5 - p
-            }/5)`
-          );
-        }
-      if (
-        !k ||
-        k.result !== "SUCCESS" ||
-        !k.data ||
-        !k.data.histories ||
-        k.data.histories.length === 0
-      ) {
-        appendLog(
-          d,
-          "\ubb34\uc81c\ud55c \uacb0\uc81c \ub0b4\uc5ed \ud638\ucd9c \uc644\ub8cc."
-        );
-        break;
-      }
-      a = a.concat(k.data.histories);
-      f++;
-    }
-    return a;
-  }
 
-  async function getRedpillHistory() {
-    if (localStorage.getItem("chasmRedpillCompressionStatus")) {
-      return JSON.parse(
-        LZString.decompress(localStorage.getItem("chasmRedpillHistory"))
-      );
-    } else {
-      return JSON.parse(localStorage.getItem("chasmRedpillHistory"));
-    }
-  }
+      document.addEventListener("mousemove", (e) => {
+          if (!isFDragging) return;
+          // 마우스를 조금이라도 움직이면 드래그로 판정 (단순 클릭과 구분)
+          if (Math.abs(e.clientX - fStartX) > 3 || Math.abs(e.clientY - fStartY) > 3) {
+              hasDragged = true;
+          }
+          if (hasDragged) {
+              e.preventDefault();
+              let newLeft = Math.max(0, Math.min(fInitLeft + (e.clientX - fStartX), window.innerWidth - fBtn.offsetWidth));
+              let newTop = Math.max(0, Math.min(fInitTop + (e.clientY - fStartY), window.innerHeight - fBtn.offsetHeight));
+              fBtn.style.left = newLeft + "px";
+              fBtn.style.top = newTop + "px";
+              fBtn.style.bottom = "auto"; 
+          }
+      });
 
-  function setRedpillHistory(text) {
-    if (text) {
-      localStorage.setItem("chasmRedpillCompressionStatus", "true");
-      localStorage.setItem(
-        "chasmRedpillHistory",
-        LZString.compress(JSON.stringify(text))
-      );
-    } else {
-      localStorage.removeItem("chasmRedpillCompressionStatus");
-      localStorage.removeItem("chasmRedpillHistory");
-    }
-  }
-  async function W(logElement, d, h, f, a, u, p, y, k, r, v, z) {
-    const accessToken = extractAccessToken();
-    if (accessToken) {
-      appendLog(logElement, "빨간약 계산 시작...");
-      var e = new Date(),
-        g = 1,
-        m = [],
-        w = [];
-      if (y) {
-        var b = await getRedpillHistory();
-        if (b) {
-          w = b;
-          a.style.display = "inline-block";
-          u.style.display = "inline-block";
-        }
-      }
-      var n = w.length > 0
-        ? [...w].sort((t, q) => new Date(q.date) - new Date(t.date))[0]
-        : null;
-
-      // Crawling entrypoint (History / Payment)
-      for (H(d, h, f, w.length > 0 ? m.concat(w) : m, document.body.dataset.theme === "dark", r, v, z); ; ) {
-        let requestUrl = `${"https://crack-api.wrtn.ai/crack-cash/crackers/history?limit=10&type=all"}&page=${g}`;
-        appendPageLog(logElement, g);
-        b = 5;
-        let t = !1,
-          jsonData;
-        for (; b > 0 && !t; )
-          try {
-            const l = await fetch(requestUrl, {
-              method: "GET",
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-              },
-              signal: p.signal,
-            });
-            if (!l.ok) throw Error(`HTTP error! Status: ${l.status}`);
-            jsonData = await l.json();
-            t = !0;
-          } catch (l) {
-            if (l.name === "AbortError") {
-              appendLog(logElement, "API 호출이 사용자에 의해 중단되었습니다.");
-              k.disabled = !1;
-              k.textContent = "\uacc4\uc0b0";
-              a.style.display = m.length > 0 ? "inline-block" : "none";
-              u.style.display = m.length > 0 ? "inline-block" : "none";
-              return;
-            }
-            if (l.message && l.message.includes("401")) {
-              let isRefreshed = confirm("장시간 탐색으로 권한이 만료되었습니다(401 에러).\n\n새 탭(Ctrl+T)을 열어 사이트에 한 번 접속(새로고침)한 뒤, 이 창으로 돌아와서 [확인]을 누르면 튕긴 곳부터 다시 이어서 진행합니다!");
-              if (isRefreshed) {
-                b = 6;
+      document.addEventListener("mouseup", () => {
+          if (isFDragging) {
+              isFDragging = false;
+              if (hasDragged) {
+                  GM_setValue("fBtnLeft", parseInt(fBtn.style.left));
+                  GM_setValue("fBtnTop", parseInt(fBtn.style.top));
               }
-            }
-            b--;
-            if (b === 0) {
-              appendLog(logElement, `Error: ${l.message} (재시도 횟수 초과)`);
-              k.disabled = !1;
-              k.textContent = "\uacc4\uc0b0";
-              a.style.display = m.length > 0 ? "inline-block" : "none";
-              u.style.display = m.length > 0 ? "inline-block" : "none";
-              return;
-            }
-            appendLog(logElement, `\uc7ac\uc2dc\ub3c4 \uc911... (${5 - b}/5)`);
-            await new Promise((B) => setTimeout(B, 500));
           }
+      });
 
-        // 🛑 더 이상 조회할 과거 데이터가 없을 때의 종료 로직
-        if (
-          !jsonData ||
-          jsonData.result !== "SUCCESS" ||
-          !jsonData.data ||
-          jsonData.data.length === 0
-        ) {
-          let finalTotal = w.length > 0 ? m.concat(w) : m;
-          if (y) setRedpillHistory(finalTotal);
-          appendLog(logElement, `\uc804\uccb4 \uae30\ub85d \ud638\ucd9c \uc644\ub8cc! (\uc18c\uc694 \uc2dc\uac04: ${Q(e, new Date())})`);
-          a.style.display = "inline-block";
-          u.style.display = "inline-block";
-          k.disabled = !1;
-          k.textContent = "\uacc4\uc0b0";
-          H(d, h, f, finalTotal, document.body.dataset.theme === "dark", r, v, z);
-          break;
-        }
-
-        // 🚀 [스마트 이어달리기 핵심 로직]
-        if (n) {
-          let cacheHitIndex = jsonData.data.findIndex((l) => l.date === n.date && l.title === n.title);
-          if (cacheHitIndex !== -1) {
-            // 1. 캐시와 겹치는 부분을 찾음! 새로운 내역만 m에 합침
-            let newRecords = jsonData.data.slice(0, cacheHitIndex);
-            m.push(...newRecords);
-            m = m.concat(w); // 2. 그 뒤에 기존 캐시를 통째로 이어 붙임!
-            w = []; // 3. 병합이 끝났으니 w는 비워줌
-
-            // 4. 모인 전체 데이터를 기준으로 이어서 탐색할 과거 페이지 번호 계산
-            let jumpPage = Math.floor(m.length / 10) + 1;
-            appendLog(logElement, `기존 캐시 확인 완료! 새로운 내역 ${newRecords.length}개 병합 후, 과거 탐색을 위해 ${jumpPage}페이지로 점프합니다 🚀`);
-
-            g = jumpPage;
-            n = null; // 점프는 한 번만 수행!
-            continue; // 다음 루프로 넘어감 (점프한 페이지부터 시작)
+      // 드래그가 아닌 단순 클릭 시 패널 열기/닫기
+      fBtn.addEventListener("click", (e) => {
+          if (!hasDragged) {
+              updateContextDisplay();
+              panel.style.display = (panel.style.display === "flex" || panel.style.display === "block") ? "none" : "flex";
           }
-        }
-
-        // 일반 수집 로직
-        m.push(...jsonData.data);
-
-        // 화면 갱신 및 캐시 저장용 임시 합본
-        let currentTotal = w.length > 0 ? m.concat(w) : m;
-
-        if (y && g % 50 === 0) {
-            setRedpillHistory(currentTotal);
-        }
-        if (g % 50 === 0) {
-            H(d, h, f, currentTotal, document.body.dataset.theme === "dark", r, v, z);
-            appendLog(logElement, `⚡ ${g}페이지 진행 중... (화면 중간 갱신 완료)`);
-        }
-
-        g++;
-        await new Promise((l) => setTimeout(l, 200));
-      }
-    } else
-      appendLog(logElement, "Error: access_token not found in cookies."),
-        (k.disabled = !1),
-        (k.textContent = "\uacc4\uc0b0"),
-        (a.style.display = "none"),
-        (u.style.display = "none");
+      });
   }
-  async function performRedPillClick(c) {
-    const prevModal = document.querySelector(".red-pill-modal");
-    prevModal && prevModal.remove();
-    let aborter = new AbortController();
-    let f = false;
-    try {
-      const darkTheme = document.body.dataset.theme === "dark",
-        modal = document.createElement("div");
-      modal.className = "red-pill-modal";
-      modal.style.cssText =
-        "\n                position: fixed;\n                top: 0;\n                left: 0;\n                width: 100%;\n                height: 100%;\n                background: rgba(0, 0, 0, 0.5);\n                z-index: 9999;\n                display: flex;\n                justify-content: center;\n                align-items: center;\n            ";
-      const p = document.createElement("div");
-      p.style.cssText = `
-                background: ${darkTheme ? "#1e1e1e" : "white"};
-                color: ${darkTheme ? "#ffffff" : "black"};
-                padding: 20px;
-                border-radius: 5px;
-                width: 80%;
-                max-width: 600px;
-                max-height: 80vh;
-                overflow-y: auto;
-                display: flex;
-                flex-direction: column;
-                gap: 10px;
-            `;
-      const header = document.createElement("div");
-      header.style.cssText =
-        "\n                display: flex;\n                justify-content: space-between;\n                align-items: center;\n            ";
-      const title = document.createElement("h2");
-      title.id = "cr-title";
-      title.style.cssText =
-        "\n                margin: 0;\n                font-family: Pretendard;\n                display: flex;\n                align-items: baseline;\n                flex-shrink: 0;\n                letter-spacing: -1px;\n            ";
-      title.innerHTML = `
-                <span style="font-weight:800; letter-spacing: -1px;">\u2318 Chasm Crystallized</span>
-                <span style="font-weight:600; margin-left: 5px; color: #ff0000;">redpill</span>
-                <span style="font-weight:500; font-size: 0.7em; color: ${
-                  darkTheme ? "#777" : "#999"
-                }; margin-left: 8px;">${VERSION}</span>
-            `;
-      const closeIcon = document.createElement("button");
-      closeIcon.id = "cr-close";
-      closeIcon.innerHTML = "\u2715";
-      closeIcon.style.cssText = `
-                background: none;
-                border: none;
-                color: ${darkTheme ? "#777" : "#e0e0e0"};
-                font-size: 1.2em;
-                cursor: pointer;
-                padding: 0;
-            `;
-      closeIcon.addEventListener("click", () => {
-        aborter.abort();
-        modal.remove();
-      });
-      header.appendChild(title);
-      header.appendChild(closeIcon);
-      const logArea = document.createElement("textarea");
-      logArea.id = "cr-log";
-      logArea.readOnly = !0;
-      logArea.setAttribute("readonly", "readonly");
-      logArea.style.cssText = `
-                width: 100%;
-                height: 100px;
-                min-height: 100px;
-                resize: none;
-                padding: 10px;
-                font-family: monospace;
-                border: 1px solid ${darkTheme ? "#444" : "#ccc"};
-                border-radius: 3px;
-                background: ${darkTheme ? "#2a2a2a" : "#fff"};
-                color: ${darkTheme ? "#ddd" : "#333"};
-            `;
-      const bodyBox = document.createElement("div");
-      bodyBox.id = "cr-cache";
-      bodyBox.style.cssText = "display: flex; align-items: center; gap: 10px;";
-      const useCacheBox = document.createElement("input");
-      useCacheBox.type = "checkbox";
-      useCacheBox.id = "cache-checkbox";
-      useCacheBox.checked = !0;
-      const cacheLabel = document.createElement("label");
-      cacheLabel.htmlFor = "cache-checkbox";
-      cacheLabel.textContent =
-        "\ube68\uac04\uc57d \ub0b4\uc5ed \ube0c\ub77c\uc6b0\uc800 \uce90\uc2dc\uc5d0 \uc800\uc7a5 (\uc784\uc2dc \uc800\uc7a5)";
-      cacheLabel.style.cssText = `color: ${darkTheme ? "#ddd" : "#333"};`;
-      const startCollectButton = document.createElement("button");
-      startCollectButton.textContent = "\uc800\uc7a5 \ub0b4\uc5ed \uc0ad\uc81c";
-      startCollectButton.style.cssText = `
-                padding: 5px 10px;
-                background: ${darkTheme ? "#ff6666" : "#ff4444"};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-            `;
-      startCollectButton.addEventListener("click", () => {
-        setRedpillHistory(undefined);
 
-        eraseCache();
-        appendLog(
-          logArea,
-          "\uce90\uc2dc\ub41c \ub0b4\uc5ed\uc774 \uc0ad\uc81c\ub418\uc5c8\uc2b5\ub2c8\ub2e4."
-        );
-        H(l, calendar, ranking, [], darkTheme, J, [], F);
-        downloadRaw.style.display = "none";
-        statDownload.style.display = "none";
-      });
-      bodyBox.appendChild(useCacheBox);
-      bodyBox.appendChild(cacheLabel);
-      bodyBox.appendChild(startCollectButton);
-      const m = document.createElement("div");
-      m.style.cssText =
-        "\n                display: flex;\n                gap: 10px;\n                align-items: center;\n            ";
-      const w = document.createElement("button");
-      w.textContent = "\uacc4\uc0b0";
-      w.style.cssText = `
-                padding: 10px 20px;
-                background: ${darkTheme ? "#cc0000" : "#ff0000"};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-            `;
-      w.addEventListener("click", () => {
-        f
-          ? (aborter.abort(),
-            (f = !1),
-            (w.textContent = "\uacc4\uc0b0"),
-            (w.disabled = !1),
-            (downloadRaw.style.display =
-              localStorageResult.length > 0 ? "inline-block" : "none"),
-            (statDownload.style.display =
-              localStorageResult.length > 0 ? "inline-block" : "none"))
-          : confirm(
-              "\ube68\uac04\uc57d \uacc4\uc0b0\uc740 \ubaa8\ub4e0 \uc0ac\uc6a9 \ub0b4\uc5ed\uc744 \ubd88\ub7ec\uc640 \ubd84\uc11d\ud569\ub2c8\ub2e4. \uacfc\ub2e4\ud55c API \ud638\ucd9c\uc740 \ubd80\uc815 \uc774\uc6a9\uc73c\ub85c \uac04\uc8fc\ub420 \uc218 \uc788\uc73c\uba70, \ub370\uc774\ud130 \uc591\uc5d0 \ub530\ub77c \uc2dc\uac04\uc774 \uc18c\uc694\ub420 \uc218 \uc788\uc2b5\ub2c8\ub2e4. \uacc4\uc18d\ud558\uc2dc\uaca0\uc2b5\ub2c8\uae4c?"
-            )
-          ? ((f = !0),
-            (w.textContent = "\uacc4\uc0b0 \uc911\uc9c0 \u23f3"),
-            (w.disabled = !1),
-            (downloadRaw.style.display = "none"),
-            (statDownload.style.display = "none"),
-            (aborter = new AbortController()),
-            W(
-              logArea,
-              l,
-              calendar,
-              ranking,
-              downloadRaw,
-              statDownload,
-              aborter,
-              useCacheBox.checked,
-              w,
-              J,
-              unlimitedLogs,
-              F
-            ).finally(() => {
-              f = !1;
-              w.textContent = "\uacc4\uc0b0";
-              w.disabled = !1;
-              downloadRaw.style.display =
-                localStorageResult.length > 0 ? "inline-block" : "none";
-              statDownload.style.display =
-                localStorageResult.length > 0 ? "inline-block" : "none";
-            }))
-          : ((f = !1), (w.textContent = "\uacc4\uc0b0"));
-      });
-      const downloadRaw = document.createElement("button");
-      downloadRaw.id = "cr-raw-download";
-      downloadRaw.textContent = "\ub0b4\uc5ed \ub2e4\uc6b4";
-      downloadRaw.style.cssText = `
-                padding: 10px 20px;
-                background: ${darkTheme ? "#005588" : "#007bff"};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-                display: none;
-            `;
-      downloadRaw.addEventListener("click", () => {
-        var A = S(localStorageResult, F);
-        A = new Blob([A], { type: "text/csv;charset=utf-8;" });
-        const tempElement = document.createElement("a");
-        tempElement.href = URL.createObjectURL(A);
-        tempElement.download = `redpill_raw_data_${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`;
-        tempElement.click();
-      });
-      const n = document.createElement("button");
-      n.textContent = "\ubd88\ub7ec\uc624\uae30";
-      n.style.cssText = `
-                padding: 10px 20px;
-                background: ${darkTheme ? "#005588" : "#007bff"};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-            `;
-      const loadButton = document.createElement("input");
-      loadButton.type = "file";
-      loadButton.accept = ".csv";
-      loadButton.style.display = "none";
-      n.addEventListener("click", () => {
-        loadButton.click();
-      });
-      loadButton.addEventListener("change", (A) => {
-        if ((A = A.target.files[0])) {
-          var G = new FileReader();
-          G.onload = (K) => {
-            K = K.target.result
-              .split("\n")
-              .map((C) =>
-                C.split(",").map((Y) => Y.trim().replace(/^"|"$/g, ""))
-              );
-            K.length < 2
-              ? alert(
-                  "\uc624\ub958: \uc62c\ubc14\ub978 \ub0b4\uc5ed \uc6d0\ubcf8 CSV \ud3ec\ub9f7\uc774 \uc544\ub2d9\ub2c8\ub2e4."
-                )
-              : K[0].join(",") !== "Date,Title,IsConsumed,Quantity,ConsumedType"
-              ? alert(
-                  "\uc624\ub958: \uc62c\ubc14\ub978 \ub0b4\uc5ed \uc6d0\ubcf8 CSV \ud3ec\ub9f7\uc774 \uc544\ub2d9\ub2c8\ub2e4."
-                )
-              : ((K = K.slice(1)
-                  .filter(
-                    (C) =>
-                      C.length >= 4 &&
-                      C[0] &&
-                      C[1] &&
-                      !isNaN(parseInt(C[3], 10))
-                  )
-                  .map((C) => ({
-                    date: C[0],
-                    title: C[1],
-                    isConsumed: C[2].toLowerCase() === "true",
-                    quantity: parseInt(C[3], 10),
-                    consumedType: C[4] || "",
-                  }))),
-                K.length === 0
-                  ? alert(
-                      "\uc624\ub958: \uc720\ud6a8\ud55c \ub370\uc774\ud130\uac00 \uc5c6\uc2b5\ub2c8\ub2e4."
-                    )
-                  : ((localStorageResult = K),
-                    setRedpillHistory(localStorageResult),
-                    (F = {}),
-                    localStorageResult.forEach((C) => {
-                      C = C.date.slice(0, 7);
-                      F[C] = !0;
-                    }),
-                    H(
-                      l,
-                      calendar,
-                      ranking,
-                      localStorageResult,
-                      darkTheme,
-                      J,
-                      unlimitedLogs,
-                      F
-                    ),
-                    (downloadRaw.style.display = "inline-block"),
-                    (statDownload.style.display = "inline-block"),
-                    appendLog(
-                      logArea,
-                      "\ub0b4\uc5ed \uc6d0\ubcf8 CSV \ud30c\uc77c\uc774 \uc131\uacf5\uc801\uc73c\ub85c \ubd88\ub7ec\uc640\uc84c\uc2b5\ub2c8\ub2e4."
-                    )));
-          };
-          G.readAsText(A);
-          loadButton.value = "";
-        }
-      });
-      const statDownload = document.createElement("button");
-      statDownload.id = "cr-stats-download";
-      statDownload.textContent = "\ud1b5\uacc4 \ub2e4\uc6b4";
-      statDownload.style.cssText = `
-                padding: 10px 20px;
-                background: ${darkTheme ? "#005588" : "#007bff"};
-                color: white;
-                border: none;
-                border-radius: 3px;
-                cursor: pointer;
-                display: none;
-            `;
-      statDownload.addEventListener("click", () => {
-        var A = T(localStorageResult, J, unlimitedLogs, F);
-        A = new Blob([A], { type: "text/csv;charset=utf-8;" });
-        const G = document.createElement("a");
-        G.href = URL.createObjectURL(A);
-        G.download = `redpill_stats_${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`;
-        G.click();
-      });
-      m.appendChild(w);
-      m.appendChild(downloadRaw);
-      m.appendChild(n);
-      m.appendChild(statDownload);
-      p.appendChild(loadButton);
-      const l = document.createElement("div");
-      l.id = "cr-stat";
-      l.style.cssText = `
-                margin: 10px 0;
-                padding: 10px;
-                border: 1px solid ${darkTheme ? "#444" : "#ccc"};
-                border-radius: 3px;
-                background: ${darkTheme ? "#2a2a2a" : "#fff"};
-            `;
-      const calendar = document.createElement("div");
-      calendar.id = "cr-calendar";
-      calendar.style.cssText = `
-                margin: 10px 0;
-                color: ${darkTheme ? "#ddd" : "#333"};
-            `;
-      const ranking = document.createElement("div");
-      ranking.id = "cr-ranking";
-      ranking.style.cssText = `
-                margin: 10px 0;
-                color: ${darkTheme ? "#ddd" : "#333"};
-            `;
-      let localStorageResult = [],
-        J = 0,
-        unlimitedLogs = [],
-        F = {};
-      const extractedToken = extractAccessToken();
-      if (extractedToken)
-        try {
-          (J = await U(extractedToken, logArea, aborter)),
-            appendLog(logArea, `\ud604\uc7ac \ubcf4\uc720\ub7c9: ${J}`),
-            (unlimitedLogs = await getUnlimitedUsageLogs(extractedToken, logArea, aborter));
-        } catch (A) {
-          appendLog(
-            logArea,
-            `\ucd08\uae30 \ub370\uc774\ud130 \ub85c\ub4dc \uc624\ub958: ${A.message}`
+  // =============================================
+  // 5. 백그라운드 스캐너 및 유틸리티
+  // =============================================
+  function backgroundScanner() {
+    const room = getChatRoomId();
+    const currentBadge = Array.from(document.querySelectorAll("p")).find(
+      (p) => p.textContent.trim() === "현재",
+    );
+    if (currentBadge) {
+      const container =
+        currentBadge.closest('div[cursor="pointer"]') ||
+        currentBadge.parentElement?.parentElement?.parentElement;
+      if (container) {
+        const nameEl = container.querySelector('p[color="text_primary"]');
+        const profileEl = container.querySelector('p[color="text_secondary"]');
+        if (nameEl)
+          GM_setValue("scannedCharName_" + room, nameEl.textContent.trim());
+        if (profileEl)
+          GM_setValue(
+            "scannedCharProfile_" + room,
+            profileEl.textContent.trim(),
           );
-          console.error(A);
+      }
+    }
+  }
+
+  function updateContextDisplay() {
+    const room = getChatRoomId();
+    const name = GM_getValue("scannedCharName_" + room, "");
+    const prof = GM_getValue("scannedCharProfile_" + room, "");
+    document.getElementById("detected-profile").innerText = name
+      ? `[${name}]\n${prof}`
+      : "❌ 프로필 선택창을 한 번 열어주세요.";
+  }
+
+  document.getElementById("cfg-pc-note").addEventListener("input", (e) => {
+    const room = getChatRoomId();
+    GM_setValue("cfgPcNote_" + room, e.target.value);
+  });
+  document.getElementById("cfg-custom-rule").addEventListener("input", (e) => {
+    const room = getChatRoomId();
+    GM_setValue("cfgCustomRule_" + room, e.target.value);
+  });
+
+  // =============================================
+  // 6. 설정 이벤트 & UI 토글
+  // =============================================
+  const egoSlider = document.getElementById("cfg-ego");
+  const egoDesc = document.getElementById("ego-desc");
+  const egoTexts = [
+    "1단계: 원본 100% 보존 (빈칸: 턴 넘기기)",
+    "2단계: 어투 완벽 동기화 (빈칸: 자연스러운 호응)",
+    "3단계: 추임새/생동감 부여 (빈칸: 능동적 진도 빼기)",
+    "4단계: 감정/분량 적극 확장 (빈칸: 적극적 몰입과 리드)",
+    "5단계: 의도 기반 완전 재창조 (빈칸: 완벽한 씬 장악)",
+  ];
+
+  const toggleProviderUI = () => {
+    const provider = document.getElementById("cfg-api-provider").value;
+    if (provider === "firebase") {
+      document.getElementById("cfg-api-key").style.display = "none";
+      document.getElementById("cfg-firebase-script").style.display = "block";
+      document.getElementById("cfg-key-label").innerText =
+        "Firebase Config 복붙창:";
+    } else {
+      document.getElementById("cfg-api-key").style.display = "block";
+      document.getElementById("cfg-firebase-script").style.display = "none";
+      document.getElementById("cfg-key-label").innerText = "GEMINI API KEY";
+    }
+  };
+  document.getElementById("cfg-api-provider").addEventListener("change", toggleProviderUI);
+
+  const loadCfg = () => {
+    const room = getChatRoomId();
+    document.getElementById("cfg-api-provider").value = GM_getValue("apiProvider", "google");
+    document.getElementById("cfg-api-key").value = GM_getValue("apiKey", "");
+    document.getElementById("cfg-firebase-script").value = GM_getValue("firebaseScript", "");
+    toggleProviderUI();
+    document.getElementById("cfg-model").value = GM_getValue("cfgModel", "gemini-3.1-pro-preview");
+    document.getElementById("cfg-style").value = GM_getValue("cfgStyle", "기본");
+    document.getElementById("cfg-pc-note").value = GM_getValue("cfgPcNote_" + room, "");
+    document.getElementById("cfg-custom-rule").value = GM_getValue("cfgCustomRule_" + room, "");
+    
+    const lenVal = GM_getValue("cfgLen", 3);
+    document.getElementById("cfg-len").value = lenVal;
+    document.getElementById("len-val").innerText = lenVal;
+
+    const savedMode = GM_getValue("cfgMode", "expand");
+    document.querySelector(`input[name="cfg-mode"][value="${savedMode}"]`).checked = true;
+
+    const pov = GM_getValue("cfgPov", "1");
+    document.querySelector(`input[name="cfg-pov"][value="${pov}"]`).checked = true;
+    document.getElementById("cfg-pov-name").value = GM_getValue("cfgPovName", "");
+    document.getElementById("cfg-pov-name").style.display = pov === "3" ? "block" : "none";
+
+    egoSlider.value = GM_getValue("cfgEgo", 1);
+    egoDesc.innerText = egoTexts[egoSlider.value - 1];
+
+    const savedTones = JSON.parse(GM_getValue("cfgTones", "[]"));
+    document.querySelectorAll(".tone-chip").forEach((chip) => {
+      chip.classList.toggle("active", savedTones.includes(chip.dataset.val));
+    });
+
+    for (let i = 1; i <= 10; i++) {
+      document.getElementById(`lore-active-${i}`).checked = GM_getValue(`loreActive${i}`, false);
+      document.getElementById(`lore-text-${i}`).value = GM_getValue(`loreText${i}`, "");
+    }
+
+    const mem = GM_getValue("cfgMemory", 8);
+    document.getElementById("cfg-memory").value = mem;
+    document.getElementById("mem-val").innerText = mem;
+
+    updateContextDisplay();
+  };
+
+  const saveCfg = () => {
+    const room = getChatRoomId();
+    GM_setValue("apiProvider", document.getElementById("cfg-api-provider").value);
+    GM_setValue("apiKey", document.getElementById("cfg-api-key").value.trim());
+    GM_setValue("firebaseScript", document.getElementById("cfg-firebase-script").value.trim());
+    GM_setValue("cfgModel", document.getElementById("cfg-model").value);
+    GM_setValue("cfgStyle", document.getElementById("cfg-style").value);
+    GM_setValue("cfgPcNote_" + room, document.getElementById("cfg-pc-note").value.trim());
+    GM_setValue("cfgCustomRule_" + room, document.getElementById("cfg-custom-rule").value.trim());
+    GM_setValue("cfgLen", document.getElementById("cfg-len").value);
+
+    const mode = document.querySelector('input[name="cfg-mode"]:checked').value;
+    GM_setValue("cfgMode", mode);
+
+    const pov = document.querySelector('input[name="cfg-pov"]:checked').value;
+    GM_setValue("cfgPov", pov);
+    GM_setValue("cfgPovName", document.getElementById("cfg-pov-name").value.trim());
+
+    GM_setValue("cfgEgo", egoSlider.value);
+
+    const activeTones = Array.from(document.querySelectorAll(".tone-chip.active")).map((c) => c.dataset.val);
+    GM_setValue("cfgTones", JSON.stringify(activeTones));
+
+    for (let i = 1; i <= 10; i++) {
+      GM_setValue(`loreActive${i}`, document.getElementById(`lore-active-${i}`).checked);
+      GM_setValue(`loreText${i}`, document.getElementById(`lore-text-${i}`).value.trim());
+    }
+
+    GM_setValue("cfgMemory", document.getElementById("cfg-memory").value);
+    alert("글로벌 설정이 저장되었습니다!");
+  };
+
+  document.getElementById("close-panel").onclick = () => (panel.style.display = "none");
+  document.getElementById("cfg-save-btn").onclick = saveCfg;
+
+  document.querySelectorAll(".tone-chip").forEach((chip) => {
+    chip.onclick = () => chip.classList.toggle("active");
+  });
+
+  document.getElementsByName("cfg-pov").forEach((r) => {
+    r.addEventListener("change", () => {
+      document.getElementById("cfg-pov-name").style.display = r.value === "3" ? "block" : "none";
+    });
+  });
+
+  document.getElementById("cfg-memory").addEventListener("input", (e) => {
+    document.getElementById("mem-val").innerText = e.target.value;
+  });
+  document.getElementById("cfg-len").addEventListener("input", (e) => {
+    document.getElementById("len-val").innerText = e.target.value;
+  });
+  egoSlider.addEventListener("input", () => {
+    egoDesc.innerText = egoTexts[egoSlider.value - 1];
+  });
+
+  document.querySelectorAll(".acc-header").forEach((header) => {
+    header.addEventListener("click", () => {
+      const target = document.getElementById(header.getAttribute("data-target"));
+      const isOpen = target.classList.contains("open");
+      target.classList.toggle("open");
+      header.innerHTML = header.innerHTML.replace(isOpen ? "▲" : "▼", isOpen ? "▼" : "▲");
+    });
+  });
+
+  // =============================================
+  // 7. Gemini API / Firebase 통신
+  // =============================================
+  async function fetchChatHistory() {
+    const path = location.pathname.match(/\/stories\/([^/]+)\/episodes\/([^/]+)/);
+    if (!path) return "(맥락 없음)";
+    try {
+      const token = document.cookie
+        .split(";")
+        .map((c) => c.trim())
+        .find((c) => c.startsWith("access_token="))
+        ?.slice(13);
+      const limit = GM_getValue("cfgMemory", 8);
+      const res = await fetch(`${API_BASE}/v3/chats/${path[2]}/messages?limit=${limit}`, {
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+      const json = await res.json();
+      const msgs = (json.data ?? json).messages ?? [];
+      return msgs.reverse().map((m) => `[${m.role === "assistant" ? "상대" : "나"}]: ${m.content}`).join("\n\n");
+    } catch (e) {
+      return "(맥락 로드 실패)";
+    }
+  }
+
+  function callGemini(baseText) {
+    return new Promise(async (resolve, reject) => {
+      const provider = GM_getValue("apiProvider", "google");
+      const room = getChatRoomId();
+      const history = await fetchChatHistory();
+      const model = GM_getValue("cfgModel", "gemini-3.1-pro-preview");
+      const name = GM_getValue("scannedCharName_" + room, "");
+      const prof = GM_getValue("scannedCharProfile_" + room, "");
+
+      const pcNote = GM_getValue("cfgPcNote_" + room, "");
+      const customRule = GM_getValue("cfgCustomRule_" + room, "");
+
+      const mode = GM_getValue("cfgMode", "expand");
+      const pov = GM_getValue("cfgPov", "1");
+      const povName = GM_getValue("cfgPovName", "");
+      const style = GM_getValue("cfgStyle", "기본");
+      const len = GM_getValue("cfgLen", 3);
+      const egoLevel = GM_getValue("cfgEgo", 1);
+      const tones = JSON.parse(GM_getValue("cfgTones", "[]")).join(", ");
+
+      const activeLores = [];
+      for (let i = 1; i <= 10; i++) {
+        if (GM_getValue(`loreActive${i}`, false) && GM_getValue(`loreText${i}`, "")) {
+          activeLores.push(GM_getValue(`loreText${i}`, ""));
         }
-      else appendLog(logArea, "Error: access_token not found in cookies.");
-      localStorage.getItem("chasmRedpillHistory")
-        ? ((localStorageResult = await getRedpillHistory()),
-          localStorageResult.forEach((A) => {
-            A = A.date.slice(0, 7);
-            F[A] = !0;
+      }
+
+      let povInstruct = pov === "1" ? "1인칭('나') 시점으로 서술" : `${povName || name || "캐릭터"} 중심의 3인칭 시점으로 서술`;
+
+      let lenInstruction = `전체 길이를 반드시 ${len}문단 내외로 배분하여 작성하십시오.`;
+      if (len == 1) lenInstruction = "전체 길이를 반드시 1문단 이내로 제한하여 아주 짧고 속도감 있게 작성하십시오.";
+      else if (len == 5) lenInstruction = "전체 길이를 최소 5~6문단 이상으로 아주 길고 볼륨감 있게 꽉꽉 채워서 작성하십시오. 분량을 아끼지 마십시오.";
+
+      let sysPrompt = `당신은 초월적인 롤플레잉 작가입니다.\n1. 시점: ${povInstruct}.\n2. 감지된 상대 정보: 이름 [${name}], 설정 [${prof}].\n`;
+      if (pcNote) sysPrompt += `3. PC(플레이어) 추가 설정: ${pcNote}\n`;
+      if (customRule) sysPrompt += `4. 커스텀 규칙: ${customRule} (이 규칙을 최우선으로 반영하세요!)\n`;
+      if (activeLores.length > 0) sysPrompt += `5. 절대 세계관: \n${activeLores.join("\n")}\n`;
+
+      sysPrompt += `6. 타 캐릭터 조종 방지: 상대방(NPC)의 대사를 임의로 지어내거나 깊은 내면을 서술하지 마십시오. 상대방의 행동은 사용자의 시야에 보이는 객관적이고 짧은 리액션 정도로 제한하십시오.\n`;
+
+      if (mode === "polish") {
+        sysPrompt += `7. 작업 모드 (다듬기): 대충 적힌 뼈대 문장의 의도를 정확히 파악하여, 문맥을 매끄럽게 연결하고 선택한 문체에 맞춰 어휘를 고급스럽게 윤문하십시오.\n`;
+      } else {
+        sysPrompt += `7. 작업 모드 (부풀리기): 전문 웹소설 작가의 화려하고 몰입감 있는 문체로 상황을 풍성하게 묘사하십시오. 피부로 느끼는 공기의 온도, 시선의 떨림 등 오감 묘사와 겉으로 드러나는 행동 이면에 깔린 감정선을 서술하여 씬의 밀도를 극대화하십시오.\n`;
+      }
+      sysPrompt += `8. 출력 분량 통제: ${lenInstruction}\n`;
+
+      let egoInstruction = "9. 대사 개입 및 상황 전개 지시: \n";
+      if (baseText) {
+        if (egoLevel == 1) egoInstruction += "- 1단계: 유저가 입력한 대사의 의미, 길이, 단어를 완벽하게 유지하며 오직 맞춤법과 띄어쓰기만 교정하십시오.\n";
+        else if (egoLevel == 2) egoInstruction += "- 2단계: 대사의 본래 의미를 훼손하지 않는 선에서, PC의 성격과 설정에 가장 자연스럽게 어울리는 특유의 말투(어투)로만 살짝 다듬으십시오.\n";
+        else if (egoLevel == 3) egoInstruction += "- 3단계: 말투를 동기화하는 것에 더해, 대사 사이사이에 감정이 묻어나는 말줄임표(...), 한숨, 미세한 떨림이나 자연스러운 추임새를 추가하여 생동감을 불어넣으십시오.\n";
+        else if (egoLevel == 4) egoInstruction += "- 4단계: 유저가 던진 뼈대 대사의 핵심 의도를 파악하고, 그에 맞는 감정을 깊게 실어 할 말을 더 풍성하고 설득력 있게 확장하십시오.\n";
+        else if (egoLevel == 5) egoInstruction += "- 5단계: 유저 대사의 뼈대 의도만 남기고 문장을 해체한 뒤, 현재 상황에서 PC가 보여줄 수 있는 가장 극적이고 몰입감 넘치는 소설 속 명대사로 100% 새롭게 지어내십시오.\n";
+      } else {
+        if (egoLevel == 1) egoInstruction += "- 1단계: 대사와 행동을 극도로 아끼고 조용히 관망하십시오. 절대 상대방(NPC)의 대사나 행동을 대신 작성하지 말고 턴을 넘기십시오.\n";
+        else if (egoLevel == 2) egoInstruction += "- 2단계: 상대방의 직전 턴에 자연스럽게 호응하십시오. 상황을 크게 바꾸지 않는 선에서 부드럽게 대화의 흐름(핑퐁)만 이어가십시오.\n";
+        else if (egoLevel == 3) egoInstruction += "- 3단계: 현재의 대화 맥락과 PC의 설정을 바탕으로, 상황을 유동적이고 매끄럽게 다음 단계로 진전시키십시오. 엉뚱한 주제를 꺼내지 말고 현재 상황 안에서 주도적으로 극을 이끌어가십시오.\n";
+        else if (egoLevel == 4) egoInstruction += "- 4단계: PC의 감정과 성격을 적극적으로 드러내어 현재 씬(Scene)의 분위기를 확실하게 리드하십시오. 상황이 정체되지 않도록 능동적이고 확신에 찬 행동으로 스토리를 전진시키십시오.\n";
+        else if (egoLevel == 5) egoInstruction += "- 5단계: 뜬금없는 사건을 터뜨리지 마십시오. 단, 현재 마주한 상황 안에서 PC가 보여줄 수 있는 가장 결단력 있고 압도적인 언행을 창작하여, 타협 없이 씬의 주도권을 100% 쥐고 상황을 강력하게 통제하십시오.\n";
+      }
+      sysPrompt += egoInstruction;
+
+      sysPrompt += "10. 유저 입력 양식 주의사항: 사용자는 입력 시 대사는 따옴표 없이 일반 텍스트로 적고, 행동이나 묘사, 속마음은 * * 기호로 감싸서 구분합니다. 이를 바탕으로 문맥을 정확히 파악하십시오.\n";
+      sysPrompt += `11. 요구 분위기: [${tones}], 문체: [${style}].\n`;
+      sysPrompt += `12. 최종 출력 양식: 행동은 * * 로, 대사는 " " 로 감싸고 둘 사이엔 줄바꿈을 넣으세요. 오직 롤플레잉 본문만 출력하세요.\n`;
+      sysPrompt += `\n[🔥 초월 작가 절대 원칙 - 퀄리티 극대화]\n`;
+      sysPrompt += `13. 오글거리는 요약/마무리 금지: 내레이터처럼 상황을 요약하거나 수사학적 질문("과연 어떻게 될까?")으로 턴을 끝내지 마십시오. 철저히 현재 진행형의 묘사, 대사, 행동으로만 씬(Scene)을 끝맺으십시오.\n`;
+      sysPrompt += `14. 일차원적 감정 서술 금지 (Show, Don't Tell): '슬펐다, 화났다, 당황했다' 같은 1차원적 단어 사용을 엄격히 금지합니다. 시선의 방향, 호흡의 변화, 손끝의 미세한 떨림 등 간접적인 행동과 생생한 오감 묘사로 텐션을 연출하십시오.\n`;
+      sysPrompt += `15. 대화의 핑퐁 최적화: 분량을 채우기 위해 불필요한 과거 회상이나 장황한 독백을 남발하지 마십시오. 상대방이 눈앞에 있다면, 상대의 미세한 반응을 살피고 즉각적으로 반응하는 실시간 상호작용에 집중하십시오.\n`;
+
+      let userContent = "";
+      if (baseText) {
+        userContent = `[이전 맥락]\n${history}\n\n[입력된 뼈대 문장]\n${baseText}\n\n위 내용을 뼈대로 지시사항에 맞춰 집필해.`;
+      } else {
+        userContent = `[이전 맥락]\n${history}\n\n[자동 이어쓰기 요청]\n사용자의 입력이 없습니다. 위 대화 맥락을 완벽히 읽고, 지시사항(특히 '대사 개입 및 상황 전개 지시' 단계)에 맞춰 당신이 직접 다음 턴(사용자 캐릭터의 반응)을 상상하여 100% 창작해 주십시오.`;
+      }
+
+      if (provider === "firebase") {
+        const configRaw = GM_getValue("firebaseScript", "");
+        if (!configRaw) return reject(new Error("설정에서 Firebase 복사본을 먼저 입력해주세요!"));
+
+        let configObj;
+        let fbVersion = "12.12.0";
+
+        try {
+          const versionMatch = configRaw.match(/firebasejs\/([0-9.]+)\/firebase-app\.js/);
+          if (versionMatch && versionMatch[1]) fbVersion = versionMatch[1];
+
+          const match = configRaw.match(/const\s+firebaseConfig\s*=\s*({[\s\S]*?});/);
+          if (match && match[1]) {
+            configObj = new Function("return " + match[1])();
+          } else {
+            const fallbackMatch = configRaw.match(/({[\s\S]*?apiKey[\s\S]*?appId[\s\S]*?})/);
+            if (fallbackMatch && fallbackMatch[1]) configObj = new Function("return " + fallbackMatch[1])();
+            else throw new Error("형식 오류");
+          }
+        } catch (e) {
+          return reject(new Error("Firebase 코드를 해독하지 못했습니다. 파이어베이스 홈페이지에서 준 <script> 태그 포함된 코드를 그대로 넣어주세요."));
+        }
+
+        try {
+          const appUrl = `https://www.gstatic.com/firebasejs/${fbVersion}/firebase-app.js`;
+          const majorVersion = parseInt(fbVersion.split(".")[0]);
+          const aiUrl = majorVersion >= 12
+              ? `https://www.gstatic.com/firebasejs/${fbVersion}/firebase-ai.js`
+              : `https://www.gstatic.com/firebasejs/${fbVersion}/firebase-vertexai.js`;
+
+          const { initializeApp, getApps, getApp } = await import(appUrl);
+          let ai, generativeModel;
+
+          if (majorVersion >= 12) {
+            const { HarmBlockThreshold, HarmCategory, getAI, getGenerativeModel, VertexAIBackend } = await import(aiUrl);
+            const apps = getApps();
+            const app = apps.length === 0 ? initializeApp(configObj) : getApp();
+            ai = getAI(app, { backend: new VertexAIBackend("global") });
+
+            const safetySettings = [
+              { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
+            ];
+
+            generativeModel = getGenerativeModel(ai, {
+              model: model,
+              safetySettings,
+              systemInstruction: { parts: [{ text: sysPrompt }] },
+              generationConfig: { temperature: 0.8 },
+            });
+          } else {
+            const { HarmBlockThreshold, HarmCategory, getVertexAI, getGenerativeModel } = await import(aiUrl);
+            const apps = getApps();
+            const app = apps.length === 0 ? initializeApp(configObj) : getApp();
+            ai = getVertexAI(app);
+
+            const safetySettings = [
+              { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
+              { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
+            ];
+
+            generativeModel = getGenerativeModel(ai, {
+              model: model,
+              safetySettings,
+              systemInstruction: { parts: [{ text: sysPrompt }] },
+              generationConfig: { temperature: 0.8 },
+            });
+          }
+
+          const result = await generativeModel.generateContent(userContent);
+          let rawResult = result.response.text().trim();
+          rawResult = rawResult.replace(/^```[^\n]*\n([\s\S]*?)\n```\s*$/m, "$1").trim();
+          resolve(rawResult);
+        } catch (e) {
+          reject(new Error("Firebase Vertex 통신 실패: " + e.message));
+        }
+      } else {
+        const key = GM_getValue("apiKey", "");
+        if (!key) return reject(new Error("설정에서 API 키를 먼저 입력해주세요!"));
+
+        GM_xmlhttpRequest({
+          method: "POST",
+          url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+          headers: { "Content-Type": "application/json" },
+          data: JSON.stringify({
+            system_instruction: { parts: [{ text: sysPrompt }] },
+            contents: [{ parts: [{ text: userContent }] }],
+            generationConfig: { temperature: 0.8 },
           }),
-          H(l, calendar, ranking, localStorageResult, darkTheme, J, unlimitedLogs, F),
-          appendLog(
-            logArea,
-            "\uce90\uc2dc\ub41c \ub370\uc774\ud130 \ub85c\ub4dc \uc644\ub8cc."
-          ),
-          (downloadRaw.style.display = "inline-block"),
-          (statDownload.style.display = "inline-block"))
-        : H(l, calendar, ranking, localStorageResult, darkTheme, J, unlimitedLogs, F);
-      p.appendChild(header);
-      p.appendChild(logArea);
-      p.appendChild(bodyBox);
-      p.appendChild(m);
-      p.appendChild(l);
-      p.appendChild(calendar);
-      p.appendChild(ranking);
-      modal.appendChild(p);
-      modal.style.display = "flex";
-      document.body.appendChild(modal);
-    } catch (a) {
-      c &&
-        (c.innerHTML =
-          '<div display="flex" class="css-sv3fmv edj5hvk0">\ud83d\udc8a \ube68\uac04\uc57d</div>'),
-        appendLog(
-          document.createElement("textarea"),
-          `\ubaa8\ub2ec \uc0dd\uc131 \uc624\ub958: ${a.message}`
-        );
-      console.error(a);
-    }
-  }
-  function onClickRedPill(c) {
-    c = c.currentTarget;
-    // c.innerHTML =
-    //   '<div display="flex" class="css-1h7hvl7 edj5hvk0">\u23f3</div>';
-    performRedPillClick(c);
-  }
-  function insertButton() {
-    if (/^\/cracker(\/.*)?$/.test(location.pathname)) {
-      var redPillButtons = document.querySelectorAll(".red-pill-button");
-      if (redPillButtons && redPillButtons.length > 0) {
-        return;
-      }
-      var menuBar = document.querySelectorAll('.css-ohbwsa div[role="tablist"]');
-      if (menuBar && menuBar.length > 0) {
-        menuBar[0].style.cssText = "max-width: 800px;";
-        const newButtonElement = document.createElement("div");
-        // To follow theme color and prevent bugs
-        const origin = menuBar[0].childNodes[0];
-        const originButton = origin.childNodes[0];
-        const originText = originButton.childNodes[0];
-        console.log(originButton);
-        newButtonElement.className = "red-pill-button " + origin.className;
-        newButtonElement.setAttribute("display", "flex");
-        newButtonElement.innerHTML = `
-          <button height="100%" display="flex" class="${originButton.className}">
-            <p color = "text_secondary"> \ud83d\udc8a 붉은약 </p>
-          </button>
-        `;
-        newButtonElement.addEventListener("click", onClickRedPill);
-        menuBar[0].append(newButtonElement);
-        for (let component of menuBar[0].childNodes) {
-          component.style.cssText = "flex-basis: 50px;";
-        }
-      }
-    }
-  }
-  /**
-   * 페이지의 상태 옵저버를 추가하고, 처음 실행되거나 URL이 변경될 때마다 업데이트를 수행합니다.
-   */
-  function setup() {
-    insertButton();
-    let oldHref = location.href;
-    new MutationObserver(() => {
-      const newHref = location.href;
-      newHref !== oldHref && ((oldHref = newHref), performInitialization());
-    }).observe(document, { subtree: !0, childList: !0 });
-    observerCreator(document.body, () => {
-      performInitialization();
-    });
-  }
-  const observerCreator = (function () {
-    const observerFactory =
-      window.MutationObserver || window.WebKitMutationObserver;
-    return function (body, lambda) {
-      if (body && observerFactory) {
-        var observer = new observerFactory((a) => {
-          lambda(a);
+          onload: (res) => {
+            try {
+              const data = JSON.parse(res.responseText);
+              if (data.error) reject(new Error(data.error.message));
+              else {
+                let raw = data.candidates[0].content.parts[0].text.trim();
+                raw = raw.replace(/^```[^\n]*\n([\s\S]*?)\n```\s*$/m, "$1").trim();
+                resolve(raw);
+              }
+            } catch (e) {
+              reject(new Error("응답 분석 실패"));
+            }
+          },
+          onerror: () => reject(new Error("네트워크 오류")),
         });
-        observer.observe(body, { childList: !0, subtree: !0, attributes: !0 });
-        return observer;
       }
-    };
-  })();
-  // ==========================================
-  //             C2 오리지널 컨텐츠
-  // ==========================================
-  // ###########################
-  //          C2 변수
-  // ###########################
-  let cachedResult = undefined;
-  let processing = false;
-
-  function findSidePanel() {
-    const element = document.getElementsByClassName("css-3vigoi");
-    if (element === undefined || element.length <= 0) {
-      return undefined;
-    }
-    return element[0];
-  }
-
-  function injectRefreshButton(panel) {
-    // To follow theme change
-    const expectedClass = isDarkMode()
-      ? "css-sv3fmv efhw7t80"
-      : "css-xohevx efhw7t80";
-    // Pre-condition check - Prevent duplicated button
-    const existing = document.getElementsByClassName("red-pill-refresh-button");
-    if (existing && existing.length > 0) {
-      const button = existing[0].childNodes[0];
-      if (button.className !== expectedClass) {
-        button.className = expectedClass;
-      }
-      return;
-    }
-    const div = document.createElement("div");
-    div.className = "css-8v90jo efhw7t80 red-pill-refresh-button";
-    div.display = "flex";
-    const button = document.createElement("button");
-    button.className = expectedClass;
-    button.display = "flex";
-    button.setAttribute("color", "text_primary");
-    button.innerHTML =
-      '<div display="flex" width="100%" class="css-1dp6yu8 eh9908w0">통계 새로고침</div>';
-    div.append(button);
-    panel.childNodes[0].insertBefore(div, panel.childNodes[0].childNodes[2]);
-    div.addEventListener("click", () => {
-      if (processing) {
-        return;
-      }
-      if (!localStorage.getItem("rp-lastParse")) {
-        if (
-          !confirm(
-            "이전에 통계를 불러온 전적이 존재하지 않습니다.\n이 작업은 매우 오래 걸리고, 완전히 불러오기 전까지는 이 페이지를 벗어나면 안됩니다.\n또한, 다른 탭으로 통계를 불러오는 행위는 캐시의 오염을 불러올 수 있습니다.\n또한, 이 기능은 모든 사용 내역을 불러와 분석하기에, 과다한 호출이 발생할 경우 부정 이용으로 간주될 수 있습니다.\n정말로 통계를 새로 고치시겠습니까?"
-          )
-        ) {
-          return;
-        }
-      }
-      processing = true;
-      div.style.cssText = 'style = "background-color: #9c9c9c87;"';
-      button.innerHTML =
-        '<div display="flex" width="100%" class="css-1dp6yu8 eh9908w0">불러오는 중..</div>';
-      safeLoadAll().then(() => {
-        processing = false;
-        div.style.cssText = "";
-        button.innerHTML =
-          '<div display="flex" width="100%" class="css-1dp6yu8 eh9908w0">통계 새로고침</div>';
-
-        injectAllCrackerUsage(cachedResult);
-      });
     });
   }
 
-  function isDarkMode() {
-    return document.body.getAttribute("data-theme") === "dark";
-  }
+  // =============================================
+  // 8. UI 자동 주입 (채팅창 내 매직 버튼 주입)
+  // =============================================
+  let currentRoomId = "";
 
-  function isLightMode() {
-    return document.body.getAttribute("data-theme") === "light";
-  }
-
-  function injectCrackerUsageContainer(
-    node,
-    index,
-    superChat,
-    cracker,
-    integrationMode
-  ) {
-    if (superChat <= 0 && cracker <= 0) {
-      deleteCrackerUsage(node, index);
-      return;
-    }
-    if (!integrationMode) {
-      let url = node.getAttribute("href");
-      if (!url) {
-        logWarning("No href found from chatting node element");
-        return;
-      } else {
-        log("Inserting realtime usage to index " + index + " (ID " + url + ")");
-      }
-    }
-    let existings = node.querySelectorAll(".red-pill-realtime-usage");
-    if (existings && existings.length > 0) {
-      // To prevent duplicated injection
-      return;
-    }
-    // Force increase height of root container
-    const container = node.childNodes[0];
-    if (!isIntegrationMode) {
-      container.style.cssText = "height: 84px; padding-top: 5px;";
-    }
-    const description = container.childNodes[1];
-    // Creating text node container (Theme controller)
-    const crackerContainerNode = document.createElement("div");
-    crackerContainerNode.setAttribute("display", "flex");
-    crackerContainerNode.setAttribute("width", "100%");
-    crackerContainerNode.className = "red-pill-realtime-usage";
-    crackerContainerNode.setAttribute("last-cracker", "0");
-    crackerContainerNode.setAttribute("last-superchat", "0");
-    if (integrationMode) {
-      crackerContainerNode.style.cssText =
-        "display: flex; flex-direction: row; align-items: center; margin-top: 0px; margin-left: 15px;";
-      node.append(crackerContainerNode);
-    } else {
-      crackerContainerNode.style.cssText =
-        "display: flex; flex-direction: row; align-items: center; margin-top: -5px;";
-      description.append(crackerContainerNode);
-    }
-  }
-
-  function updateUsage(node, index, superChat, cracker) {
-    if (superChat <= 0 && cracker <= 0) {
-      deleteCrackerUsage(node, index);
-      return;
-    }
-    let crackerContainerNodes = node.getElementsByClassName(
-      "red-pill-realtime-usage"
-    );
-    if (!crackerContainerNodes || crackerContainerNodes.length <= 0) {
-      injectCrackerUsageContainer(
-        node,
-        index,
-        superChat,
-        cracker,
-        isIntegrationMode
-      );
-    }
-    crackerContainerNodes = node.getElementsByClassName(
-      "red-pill-realtime-usage"
-    );
-    if (!crackerContainerNodes || crackerContainerNodes.length <= 0) {
-      logError("Failed to inject cracker content; Element not injected");
-      return;
-    }
-    const crackerContainerNode = crackerContainerNodes[0];
-    if (
-      crackerContainerNode.getAttribute("last-cracker") ===
-        cracker.toString() &&
-      crackerContainerNode.getAttribute("last-superchat") ===
-        superChat.toString()
-    ) {
-      return;
-    }
-    crackerContainerNode.setAttribute("last-cracker", cracker.toString());
-    crackerContainerNode.setAttribute("last-superchat", superChat.toString());
-    if (crackerContainerNode) crackerContainerNode.innerHTML = "";
-    if (cracker > 0) {
-      // Creating text node (Cracker usages)
-      const textContent = document.createElement("p");
-      textContent.className = isDarkMode()
-        ? "chat-list-item-topic css-1a0pj6v efhw7t80"
-        : "chat-list-item-character-name css-qwz0be efhw7t80";
-      textContent.style.cssText = "margin-right: 3px";
-      textContent.innerText = cracker.toLocaleString(undefined, {
-        minimumFractionDigits: 0,
-      });
-      const svg = createCrackerSvg();
-      svg.style.marginRight = "4px";
-      // Assemble cracker contents
-      crackerContainerNode.append(textContent);
-      crackerContainerNode.append(svg);
-    }
-    if (superChat > 0) {
-      // Creating text node (Cracker usages)
-      const textContent = document.createElement("p");
-      textContent.className = isDarkMode()
-        ? "chat-list-item-topic css-1a0pj6v efhw7t80"
-        : "chat-list-item-character-name css-qwz0be efhw7t80";
-      textContent.style.cssText = "margin-right: 3px";
-      textContent.innerText = superChat.toLocaleString(undefined, {
-        minimumFractionDigits: 0,
-      });
-      // Assemble cracker contents
-      crackerContainerNode.append(textContent);
-      crackerContainerNode.append(createSuperChatSvg());
-    }
-  }
-
-  function deleteCrackerUsage(node, index) {
-    let existings = node.getElementsByClassName("red-pill-realtime-usage");
-    if (!existings || existings.length <= 0) {
-      // To prevent duplicated injection
-      return;
-    }
-    const container = node.childNodes[0];
-    container.style.cssText = "";
-    const crackerContainerNodes = container.getElementsByClassName(
-      "red-pill-realtime-usage"
-    );
-    if (crackerContainerNodes && crackerContainerNodes.length > 0) {
-      crackerContainerNodes[0].remove();
-    }
-  }
-
-  function injectIntegrationNode() {
-    const nodes = document.getElementsByClassName(
-      "chasm-fold-category-integration"
-    );
-    for (let index = 0; index < nodes.length; index++) {
-      const title = nodes[index].getAttribute("chasm-fold-article-origin");
-      updateUsage(
-        nodes[index],
-        index,
-        cachedResult[title]?.superchat ?? 0,
-        cachedResult[title]?.cracker ?? 0
-      );
-    }
-  }
-  function injectAllCrackerUsage() {
-    loadLocalCache();
-    if (isIntegrationMode) {
-      injectIntegrationNode();
-      return;
-    }
-    if (
-      document.getElementsByClassName("chasm-fold-category-integration")
-        .length > 0
-    ) {
-      log("Fold update detected. Running as integration mode");
-      isIntegrationMode = true;
-      injectIntegrationNode();
-      return;
-    }
-    // Check integration first
-    let selected = document.getElementsByTagName("a");
-    const nodes = [];
-    for (let node of selected) {
-      if (node.getAttribute("href").startsWith("/stories/")) {
-        nodes.push(node);
-      }
-    }
-    if (!nodes || nodes.length <= 0) {
-      logWarning(
-        "No chattings found; Does crack updated, or no chatting started?"
-      );
-      return;
+  function injectUI() {
+    const newRoomId = getChatRoomId();
+    if (currentRoomId !== newRoomId) {
+      currentRoomId = newRoomId;
+      loadCfg();
     }
 
-    for (let index = 0; index < nodes.length; index++) {
-      if (nodes[index].nodeName.toLowerCase() === "a") {
-        const title = extractTitleFromNode(nodes[index]);
-        updateUsage(
-          nodes[index],
-          index,
-          cachedResult[title]?.superchat ?? 0,
-          cachedResult[title]?.cracker ?? 0
-        );
-      } else {
-        logWarning(
-          "Cannot determine chatting id from index " +
-            index +
-            ": Parent node is not link node (Expected 'a', Value '" +
-            nodes[index].nodeName.toLowerCase() +
-            "'"
-        );
-      }
-    }
-    // "https://contents-api.wrtn.ai/superchat/character-super-mode/history?limit=20&type=all"}&page=${g}
-  }
+    // 마법 버튼(✨) 주입을 위한 전송 버튼 찾기
+    const sendBtnIcon = document.querySelector('path[d*="M18.77 11.13"]');
+    const sendBtn = sendBtnIcon ? sendBtnIcon.closest("button") : null;
 
-  async function safeLoadAll() {
-    const oldCache = structuredClone(cachedResult);
-    try {
-      await loadAll();
-    } catch (error) {
-      logError(
-        "Failed to load history due to error. Injecting to UI with last fetched data."
-      );
-      if (error.message && error.message.startsWith("CRYS: ")) {
-        alert(error.message.substring(6));
-      }
-      //   cachedResult = oldCache;
-      injectAllCrackerUsage(cachedResult);
-    }
-  }
+    if (sendBtn && !document.getElementById("crack-pure-magic-btn")) {
+      const group = document.createElement("div");
+      group.className = "crack-right-group";
+      sendBtn.parentNode.insertBefore(group, sendBtn);
 
-  async function loadAll() {
-  let history = null; // 브라우저 내장 객체와 충돌하지 않도록 지역 변수로 선언 추가
-  loadLocalCache();
-  const token = extractAccessToken();
-  let page = 1;
-    let lastParse = undefined;
-    if (localStorage.getItem("rp-lastParse")) {
-      lastParse = new Date(localStorage.getItem("rp-lastParse"));
-      log("Previous history found. Parsing after " + lastParse);
-    } else {
-      log(
-        "No successful parse history found. Redpill will try load all history"
-      );
-      localStorage.removeItem("rp-parseHistory");
-      cachedResult = {};
-      injectAllCrackerUsage();
-    }
-    if (localStorage.getItem("rp-parseHistory")) {
-      log("History data found. Loading from local storage..");
-      const start = new Date();
-      history = JSON.parse(localStorage.getItem("rp-parseHistory"));
-      log(
-        "History loaded in " + (new Date().getTime() - start.getTime()) + "ms"
-      );
-    }
-    let menuMap = createMenuMapFor();
-    let newestParse = undefined;
-    let requireStop = false;
-    let count = 0;
-    let retry = 0;
-    while (!requireStop) {
-        await new Promise((r) => setTimeout(r, 200));
+      const hWidget = document.createElement("div");
+      hWidget.id = "crack-history-widget";
+      hWidget.className = "crack-history-widget";
+      hWidget.innerHTML = `
+                <span class="crack-history-btn" id="history-prev">◀</span>
+                <span id="history-text">1/1</span>
+                <span class="crack-history-btn" id="history-next">▶</span>
+            `;
+      group.appendChild(hWidget);
 
-      let result = undefined;
-      while (result === undefined) {
-        try {
-          let fetched = await fetch(
-            "https://contents-api.wrtn.ai/superchat/crackers/history?limit=20&type=consumed&page=" +
-              page++,
-            {
-              method: "GET",
-              headers: {
-               Authorization: `Bearer ${extractAccessToken()}`,
-                "Content-Type": "application/json",
-              },
-            }
-          );
-          if (!fetched.ok) {
-            if (retry++ >= 5) {
-              throw new Error("CRYS: 최대 재시도 횟수 이상으로 요청에서 오류가 발생하였습니다.\n나중에 다시 시도하세요.");
-            } else {
-              logError("Server returned HTTP code " + fetched.status + ", retrying after 2000ms");
-              // 서버 과부하 차단 시 2초 대기 잘 적용되었습니다!
-              await new Promise((r) => setTimeout(r, 2000));
-            }
-            continue;
-          } else {
-            result = fetched;
-          }
-        } catch (error) {
-          if (retry++ >= 5) {
-            throw new Error(
-              "CRYS: 최대 재시도 횟수 이상으로 요청에서 오류가 발생하였습니다.\n나중에 다시 시도하세요."
-            );
-          } else {
-            logError("Unexpected error occured, retry after 100ms");
-            await new Promise((r) => setTimeout(r, 100));
-          }
-        }
-      }
+      const gBtn = document.createElement("button");
+      gBtn.id = "crack-pure-magic-btn";
+      gBtn.className = "crack-pure-magic";
+      gBtn.innerHTML = `<span id="magic-icon" style="font-size: 14px;">✨</span>`;
 
-      retry = 0;
-      let json = await result.json();
-      if (!json.data || json.data.length <= 0) {
-        log("STOPPING! No data returned, or end of the page?");
-        requireStop = true;
-        break;
-      }
-      let purchaseHistory = json.data;
-      for (let data of purchaseHistory) {
-        let purchaseTime = new Date(data.date);
-        if (lastParse && purchaseTime.getTime() <= lastParse.getTime()) {
-          log("STOPPING! Reached last parsing history.");
-          requireStop = true;
-          break;
-        }
-        if (!newestParse) {
-          newestParse = data.date;
-        }
-        const title = data.title;
-        if (!cachedResult[title]) {
-          cachedResult[title] = {
-            cracker: 0,
-            superchat: 0,
-          };
-        }
-        const balance = data.balance.total;
-        if (data.product === "cracker") {
-          cachedResult[title].cracker += balance;
-        } else if (data.product === "superchat") {
-          cachedResult[title].superchat += balance;
+      const updateChatInputFromHistory = () => {
+        const chatInput = document.querySelector('.__chat_input_textarea, div[contenteditable="true"], textarea');
+        if (!chatInput || generatedHistory.length === 0) return;
+        const textToInsert = generatedHistory[historyIndex];
+
+        if (chatInput.tagName === "TEXTAREA") {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+          setter.call(chatInput, textToInsert);
+          chatInput.style.height = "auto";
+          chatInput.style.height = chatInput.scrollHeight + "px";
         } else {
-          logWarning(
-            "Unknown product type '" +
-              data.product +
-              "' from article '" +
-              title +
-              "'"
-          );
+          chatInput.innerHTML = `<p>${textToInsert}</p>`;
         }
-        let node = menuMap[title];
-        if (node) {
-          injectAllCrackerUsage();
+        chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+        chatInput.focus();
+        document.getElementById("history-text").innerText = `${historyIndex + 1}/${generatedHistory.length}`;
+      };
+
+      hWidget.querySelector("#history-prev").onclick = (e) => {
+        e.preventDefault();
+        if (historyIndex > 0) { historyIndex--; updateChatInputFromHistory(); }
+      };
+      hWidget.querySelector("#history-next").onclick = (e) => {
+        e.preventDefault();
+        if (historyIndex < generatedHistory.length - 1) { historyIndex++; updateChatInputFromHistory(); }
+      };
+
+      gBtn.onclick = async (e) => {
+        e.preventDefault();
+        const chatInput = document.querySelector('.__chat_input_textarea, div[contenteditable="true"], textarea');
+        if (!chatInput) return alert("채팅 입력창을 찾을 수 없습니다.");
+
+        const baseText = chatInput.tagName === "TEXTAREA" ? chatInput.value.trim() : chatInput.innerText.trim();
+        const icon = document.getElementById("magic-icon");
+        icon.innerHTML = "⏳";
+        icon.classList.add("spin-anim");
+
+        try {
+          const result = await callGemini(baseText);
+          if (generatedHistory.length === 0) generatedHistory.push(baseText);
+          generatedHistory.push(result);
+          historyIndex = generatedHistory.length - 1;
+          updateContextDisplay();
+          updateChatInputFromHistory();
+
+          if (generatedHistory.length > 1) {
+            hWidget.style.display = "flex";
+          }
+        } catch (err) {
+          alert(err.message);
+        } finally {
+          icon.innerHTML = "✨";
+          icon.classList.remove("spin-anim");
         }
-      }
+      };
+
+      group.appendChild(gBtn);
+      group.appendChild(sendBtn);
+
+      sendBtn.addEventListener("click", () => {
+        generatedHistory = [];
+        historyIndex = -1;
+        hWidget.style.display = "none";
+      });
     }
 
-    if (newestParse) {
-      localStorage.setItem("rp-lastParse", newestParse);
-    }
-    localStorage.setItem("rp-parseHistory", JSON.stringify(cachedResult));
-    log("All system set, updating all nodes");
-    injectAllCrackerUsage();
-    return history;
-  }
-
-  function createMenuMapFor() {
-    let selected = document.querySelectorAll(".css-16q3jhz");
-    const map = {};
-    for (let node of selected) {
-      let title = extractTitleFromNode(node.parentElement);
-      map[title] = node.parentElement;
-    }
-    return map;
-  }
-
-  function extractTitleFromNode(node) {
-    return node.childNodes[0].childNodes[1].childNodes[0].innerText;
-  }
-  function createCrackerSvg() {
-    const svg = document.createElement("div");
-    svg.style.cssText = "height: fit-content; margin-top: 2px;";
-    svg.innerHTML =
-      '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" width="16" height="16"><path fill="#FFA600" d="M21.17 12.01c.52-.59.83-1.36.83-2.21s-.31-1.62-.83-2.21c.06-.07.12-.14.17-.21 0 0 .01-.02.02-.02.05-.07.1-.14.14-.21 0-.02.02-.03.03-.05.04-.07.08-.13.11-.2.01-.02.02-.05.04-.08.03-.06.06-.13.09-.2.01-.03.03-.07.04-.11l.06-.18c.01-.05.02-.1.04-.14.01-.05.03-.1.04-.16l.03-.19c0-.04.01-.09.02-.13 0-.11.01-.22.01-.33 0-1.86-1.51-3.37-3.37-3.37-.11 0-.22 0-.33.01-.04 0-.08 0-.12.02-.07 0-.13.02-.19.03-.05 0-.1.02-.16.04-.05.01-.1.02-.14.04l-.18.06c-.04.01-.07.02-.11.04-.07.02-.13.05-.19.09a.3.3 0 0 0-.08.04c-.07.03-.14.07-.2.11-.02 0-.03.02-.05.03-.07.04-.14.09-.21.14 0 0-.02.01-.02.02-.07.05-.14.11-.21.17-.59-.51-1.36-.83-2.21-.83s-1.62.31-2.21.83a3.32 3.32 0 0 0-2.21-.83c-.85 0-1.62.31-2.21.83-.07-.06-.14-.12-.21-.17 0 0-.02-.01-.02-.02-.07-.05-.14-.1-.21-.14-.02 0-.03-.02-.05-.03-.07-.04-.13-.08-.2-.11-.02-.01-.05-.02-.08-.04-.06-.03-.13-.06-.2-.09-.03-.01-.07-.03-.11-.04l-.18-.06c-.05-.01-.1-.02-.14-.04-.05-.01-.1-.03-.16-.04l-.19-.03c-.04 0-.09-.01-.13-.02-.11 0-.22-.01-.33-.01-1.86 0-3.37 1.51-3.37 3.37 0 .11 0 .22.01.33 0 .04 0 .08.02.12 0 .07.02.13.03.19 0 .05.02.1.04.16.01.05.02.1.04.14l.06.18c.01.04.02.07.04.11.02.07.05.13.09.19a.3.3 0 0 0 .04.08c.03.07.07.14.11.2 0 .02.02.03.03.05.04.07.09.14.14.21 0 0 .01.02.02.02.05.07.11.14.17.21a3.32 3.32 0 0 0-.83 2.21c0 .85.31 1.62.83 2.21a3.32 3.32 0 0 0-.83 2.21c0 .85.31 1.62.83 2.21-.06.07-.12.14-.17.21 0 0-.01.02-.02.02-.05.07-.1.14-.14.21 0 .02-.02.03-.03.05-.04.07-.08.13-.11.2-.01.02-.02.05-.04.08-.03.06-.06.13-.09.2-.01.03-.03.07-.04.11l-.06.18c-.01.05-.02.1-.04.14-.01.05-.03.1-.04.16l-.03.19c0 .04-.01.09-.02.13 0 .11-.01.22-.01.33A3.35 3.35 0 0 0 3.02 21c.61.61 1.45.99 2.38.99.11 0 .22 0 .33-.01.04 0 .08 0 .12-.02.07 0 .13-.02.19-.03.05 0 .1-.02.16-.04.05-.01.1-.02.14-.04l.18-.06c.04-.01.07-.02.11-.04.07-.02.13-.05.19-.09a.3.3 0 0 0 .08-.04c.07-.03.14-.07.2-.11.02 0 .03-.02.05-.03.07-.04.14-.09.21-.14 0 0 .02-.01.02-.02.07-.05.14-.11.21-.17.59.51 1.36.83 2.21.83s1.62-.31 2.21-.83c.59.52 1.36.83 2.21.83s1.62-.31 2.21-.83c.07.06.14.12.21.17 0 0 .02.01.02.02.07.05.14.1.21.14.02 0 .03.02.05.03.07.04.13.08.2.11.02.01.05.02.08.04.06.03.13.06.2.09.03.01.07.03.11.04l.18.06c.05.01.1.02.14.04.05.01.1.03.16.04l.19.03c.04 0 .09.01.13.02.11 0 .22.01.33.01.92 0 1.75-.37 2.36-.97l.02-.02c.61-.61.99-1.45.99-2.38 0-.11 0-.22-.01-.33 0-.04 0-.08-.02-.12 0-.07-.02-.13-.03-.19 0-.05-.02-.1-.04-.16a.6.6 0 0 0-.04-.14l-.06-.18a.5.5 0 0 0-.04-.11.7.7 0 0 0-.09-.19.3.3 0 0 0-.04-.08c-.03-.07-.07-.14-.11-.2 0-.02-.02-.03-.03-.05-.04-.07-.09-.14-.14-.21 0 0-.01-.02-.02-.02-.05-.07-.11-.14-.17-.21.52-.59.83-1.36.83-2.21s-.31-1.62-.83-2.21M7.5 13.5 6 12l1.5-1.5L9 12zM12 6l1.5 1.5L12 9l-1.5-1.5zm0 12-1.5-1.5L12 15l1.5 1.5zm4.5-4.5L15 12l1.5-1.5L18 12z"></path></svg>';
-    return svg;
-  }
-
-  function createSuperChatSvg() {
-    const svg = document.createElement("div");
-    svg.style.cssText = "height: fit-content; margin-top: 4px;";
-    svg.innerHTML =
-      '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" width="16" height="16"><path fill="#1A88FF" d="M12.621 1.98c-5.414-.322-10.067 3.8-10.39 9.207a9.73 9.73 0 0 0 1.633 6.023l-.586 4.988 5.3-1.238c.896.34 1.86.558 2.87.618 5.415.323 10.067-3.8 10.39-9.207.323-5.406-3.81-10.067-9.217-10.39"></path><path fill="#fff" d="M16.07 12.21s-.01-.05-.02-.08c-.16-.73-.52-1.31-.86-1.71a18 18 0 0 0-.29-.33 8 8 0 0 1-.92-1.18s0-.01-.01-.02c0 0 0-.01-.01-.02-.52-.84-.88-1.78-1.05-2.79-.8.24-1.48.76-1.93 1.45-.02.03-.04.07-.07.11-.26.43-.42.93-.47 1.46 0 .1-.01.2-.01.31 0 .51.11.99.31 1.43a1.63 1.63 0 0 1-1.15-1.33c-.82.51-1.44 1.31-1.73 2.25 0 0 0 .03-.01.04-.09.31-.15.64-.16.98v.29c0 .26.04.52.1.77v.02c0 .01 0 .03.01.04.28 1.13 1.05 2.07 2.08 2.62.6.32 1.29.5 2.02.5h.01c2.34 0 4.23-1.81 4.24-4.05 0-.26-.02-.51-.07-.76z"></path></svg>';
-    return svg;
-  }
-
-  function loadLocalCache() {
-    if (cachedResult === undefined) {
-      if (localStorage.getItem("rp-parseHistory")) {
-        cachedResult = JSON.parse(localStorage.getItem("rp-parseHistory"));
-      } else {
-        cachedResult = {};
-      }
+    const chatInput = document.querySelector('.__chat_input_textarea, div[contenteditable="true"], textarea');
+    if (chatInput && !chatInput.dataset.historyHooked) {
+      chatInput.dataset.historyHooked = "true";
+      chatInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          generatedHistory = [];
+          historyIndex = -1;
+          const w = document.getElementById("crack-history-widget");
+          if (w) w.style.display = "none";
+        }
+      });
     }
   }
 
-  function log(message) {
-    console.log(
-      "%cChasm Crystallized RedPill: %cInfo: %c" + message,
-      "color: cyan;",
-      "color: blue;",
-      "color: inherit;"
-    );
-  }
+  // 최초 1회 플로팅 버튼 초기화
+  initFloatingButton();
 
-  function logWarning(message) {
-    console.log(
-      "%cChasm Crystallized RedPill: %cWarning: %c" + message,
-      "color: cyan;",
-      "color: yellow;",
-      "color: inherit;"
-    );
-  }
-
-  function logError(message) {
-    console.log(
-      "%cChasm Crystallized RedPill: %cError: %c" + message,
-      "color: cyan;",
-      "color: red;",
-      "color: inherit;"
-    );
-  }
-
-  function eraseCache() {
-    processing = true;
-    localStorage.removeItem("rp-lastParse");
-    localStorage.removeItem("rp-parseHistory");
-    cachedResult = {};
-    injectAllCrackerUsage();
-    processing = false;
-  }
-
-  function performInitialization() {
-    // No initialization will perform while processing
-    if (processing) {
-      return;
-    }
-    insertButton();
-    const panel = findSidePanel();
-    if (panel) {
-      loadLocalCache();
-      injectRefreshButton(panel);
-      injectAllCrackerUsage();
-    }
-  }
-  // ==========================================
-  //                초기화
-  // ==========================================
-
-  document.readyState === "loading"
-    ? document.addEventListener("DOMContentLoaded", setup)
-    : setup();
-  window.addEventListener("load", setup);
+  setInterval(() => {
+    backgroundScanner();
+    injectUI();
+  }, 1000);
 })();
