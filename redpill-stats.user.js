@@ -1011,31 +1011,25 @@ GM_addStyle(
   }
   function insertButton() {
     if (/^\/cracker(\/.*)?$/.test(location.pathname)) {
-      var redPillButtons = document.querySelectorAll(".red-pill-button");
-      if (redPillButtons && redPillButtons.length > 0) {
+      if (document.querySelector(".red-pill-button")) {
         return;
       }
-      var menuBar = document.querySelectorAll('.css-ohbwsa div[role="tablist"]');
-      if (menuBar && menuBar.length > 0) {
-        menuBar[0].style.cssText = "max-width: 800px;";
-        const newButtonElement = document.createElement("div");
-        // To follow theme color and prevent bugs
-        const origin = menuBar[0].childNodes[0];
-        const originButton = origin.childNodes[0];
-        const originText = originButton.childNodes[0];
-        console.log(originButton);
-        newButtonElement.className = "red-pill-button " + origin.className;
-        newButtonElement.setAttribute("display", "flex");
-        newButtonElement.innerHTML = `
-          <button height="100%" display="flex" class="${originButton.className}">
-            <p color = "text_secondary"> \ud83d\udc8a 붉은약 </p>
-          </button>
-        `;
-        newButtonElement.addEventListener("click", onClickRedPill);
-        menuBar[0].append(newButtonElement);
-        for (let component of menuBar[0].childNodes) {
-          component.style.cssText = "flex-basis: 50px;";
-        }
+
+      const tabList = document.querySelector('[role="tablist"]');
+
+      if (tabList) {
+        const originTab = tabList.querySelector('[role="tab"]');
+        const baseClass = originTab ? originTab.className : "";
+
+        const newBtn = document.createElement("button");
+        newBtn.className = "red-pill-button " + baseClass;
+
+        newBtn.style.cssText = "color: #ff4444; font-weight: bold; cursor: pointer; padding: 0 10px;";
+        newBtn.innerHTML = "💊 붉은약";
+
+        newBtn.addEventListener("click", onClickRedPill);
+
+        tabList.appendChild(newBtn);
       }
     }
   }
